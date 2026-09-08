@@ -1,0 +1,37 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ztauth
+      POSTGRES_PASSWORD: ztauth
+      POSTGRES_DB: ztauth
+    ports:
+      - "5432:5432"
+    volumes:
+      - zt_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ztauth"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://ztauth:ztauth@db:5432/ztauth
+      JWT_SECRET: dev-secret-change-me
+      MODEL_STORE: local
+      MODEL_STORE_LOCAL_DIR: /app/model_store_data
+    ports:
+      - "8000:8000"
+    volumes:
+      - zt_model_store:/app/model_store_data
+
+volumes:
+  zt_pg_data:
+  zt_model_store:

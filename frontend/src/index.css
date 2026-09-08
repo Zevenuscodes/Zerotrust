@@ -1,0 +1,93 @@
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #f0f1f4;
+  --border: #e3e5ea;
+  --text: #4b5160;
+  --text-h: #14161c;
+  --text-dim: #8a90a0;
+  --accent: #3b82f6;
+  --accent-hover: #2f6fd6;
+  --accent-bg: rgba(59, 130, 246, 0.1);
+
+  --success: #1a9850;
+  --success-bg: rgba(26, 152, 80, 0.12);
+  --warning: #dd8b0f;
+  --warning-bg: rgba(243, 156, 18, 0.12);
+  --danger: #d73027;
+  --danger-bg: rgba(215, 48, 39, 0.12);
+
+  --shadow: 0 10px 30px -12px rgba(20, 22, 30, 0.18), 0 2px 8px -2px rgba(20, 22, 30, 0.08);
+  --radius: 14px;
+
+  --sans: system-ui, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+
+  color-scheme: light dark;
+  font: 15px/1.55 var(--sans);
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d0f13;
+    --surface: #171a21;
+    --surface-2: #1d212b;
+    --border: #272c37;
+    --text: #9aa2b1;
+    --text-h: #eef1f5;
+    --text-dim: #6b7280;
+    --accent: #5b9dfb;
+    --accent-hover: #7cb0ff;
+    --accent-bg: rgba(91, 157, 251, 0.14);
+    --shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.5), 0 2px 8px -2px rgba(0, 0, 0, 0.35);
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #0d0f13;
+  --surface: #171a21;
+  --surface-2: #1d212b;
+  --border: #272c37;
+  --text: #9aa2b1;
+  --text-h: #eef1f5;
+  --text-dim: #6b7280;
+  --accent: #5b9dfb;
+  --accent-hover: #7cb0ff;
+  --accent-bg: rgba(91, 157, 251, 0.14);
+  --shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.5), 0 2px 8px -2px rgba(0, 0, 0, 0.35);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+#root { min-height: 100vh; }
+
+h1, h2, h3 {
+  font-family: var(--sans);
+  font-weight: 650;
+  color: var(--text-h);
+  margin: 0;
+}
+
+p { margin: 0; }
+
+code {
+  font-family: var(--mono);
+  border-radius: 6px;
+}
+
+a { color: var(--accent); }
+
+button { font-family: var(--sans); }

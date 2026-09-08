@@ -1,0 +1,9 @@
+aws_region   = "us-east-1"
+project_name = "zero-trust-auth"
+
+alert_email = "you@example.com"
+
+# Leave these two empty to auto-generate (stored as SecureString in SSM
+# Parameter Store) -- only set them if you want a specific value.
+# db_password = ""
+# jwt_secret  = ""

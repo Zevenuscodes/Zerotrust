@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.db
+
+# Node
+node_modules/
+dist/
+
+# env files
+.env
+*.env.local
+
+# app data
+backend/model_store_data/
+backend/static/
+
+# Terraform
+infra/**/.terraform/
+infra/**/*.tfstate
+infra/**/*.tfstate.backup
+infra/**/.terraform.lock.hcl
+infra/**/*.tfvars
+
+# OS
+.DS_Store
