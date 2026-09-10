@@ -3,7 +3,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session as DBSession
 
-from app.config import OPERATION_CONFIG, settings
+from app.config import DEMO_LOCATIONS, OPERATION_CONFIG, settings
 from app.database import get_db
 from app.deps import get_current_session, get_current_user
 from app.geolocation import lookup as geo_lookup
@@ -31,6 +31,11 @@ def submit_telemetry(
     user: User = Depends(get_current_user),
 ):
     ip = client_ip(request)
+    # Demo-only override: swap in a known public IP for a picked city so the
+    # impossible-travel check is demonstrable from a browser. Off unless
+    # explicitly enabled, and only ever resolves to the fixed allow-list.
+    if settings.demo_location_enabled and payload.simulated_location in DEMO_LOCATIONS:
+        ip = DEMO_LOCATIONS[payload.simulated_location]
     geo = geo_lookup(ip)
     operation = payload.operation if payload.operation in OPERATION_CONFIG else "view"
 
@@ -44,6 +49,24 @@ def submit_telemetry(
         ip_address=ip,
         geo=geo,
     )
+
+    if result["idle"]:
+        # No keyboard/mouse activity since the last heartbeat -- nothing was
+        # scored, so nothing about the session changes. Report current state
+        # as-is rather than writing an audit row for a heartbeat that did
+        # nothing.
+        return SessionStatusResponse(
+            session_id=auth_session.id,
+            operation=operation,
+            trust_score=result["trust_score"],
+            behavior_score=result["behavior_score"],
+            context_score=result["context_score"],
+            decision=result["decision"],
+            mfa_pending=auth_session.mfa_pending,
+            reasons=result["reasons"],
+            trust_vector=result["trust_vector"],
+            idle=True,
+        )
 
     # Only reinforce the behavior model with samples the risk engine trusted,
     # so an attacker's own telemetry can't poison the legitimate user's

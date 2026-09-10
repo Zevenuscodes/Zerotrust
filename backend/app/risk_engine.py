@@ -48,7 +48,16 @@ from app.model_store import model_store
 from app.models import AuthSession, BehaviorSample, KnownContext, OperationTransition, OperationTrust
 from app.schemas import ContextSample, KeystrokeSample, MouseSample
 
-MIN_SAMPLES_FOR_MODEL = 5
+# An IsolationForest needs meaningfully more than a handful of points in this
+# 8-dimensional feature space to say anything at all. Measured on this
+# feature set: at 5 samples it returns the *same* score for a normal sample
+# and a 3x-faster-typing anomaly (no discriminative power whatsoever), and it
+# only starts ranking anomalies below normal samples at ~10, with clear
+# separation from ~20. Handing over to it at 5 produced a large scoring
+# discontinuity -- identical behavior scored ~96 on the statistical path and
+# ~50 the moment the forest took over. Below this threshold the standardized
+# per-feature distance path is both better behaved and better calibrated.
+MIN_SAMPLES_FOR_MODEL = 20
 FEATURE_ORDER = [
     "mean_dwell_ms",
     "std_dwell_ms",
@@ -88,6 +97,25 @@ def _history_matrix(samples: List[BehaviorSample]) -> np.ndarray:
     )
 
 
+# How much natural sample-to-sample variation to assume for a feature before
+# any real variance has been observed (e.g. a single baseline sample, where
+# std is literally 0). A flat absolute floor here is wrong: 1.0 is far too
+# tight for a ~90ms dwell-time feature (any normal 15-20ms human variation
+# between heartbeats reads as a huge z-score) and too loose for a ~0.01
+# acceleration feature. Scaling the floor to the feature's own magnitude
+# fixes both directions at once.
+RELATIVE_STD_FLOOR = 0.15
+ABSOLUTE_STD_FLOOR = 1e-3
+
+# Minimum spread to assume among IsolationForest score_samples values. Their
+# scale is unrelated to the raw features', so this needs its own floor.
+ISOFOREST_SCORE_STD_FLOOR = 0.01
+
+
+def _safe_std(std: np.ndarray, mean: np.ndarray) -> np.ndarray:
+    return np.maximum(std, np.maximum(RELATIVE_STD_FLOOR * np.abs(mean), ABSOLUTE_STD_FLOOR))
+
+
 def _per_feature_scores(features: dict, history: np.ndarray) -> List[dict]:
     """Per-parameter breakdown: how far each individual feature sits from the
     (operation-specific) historical baseline used for this evaluation."""
@@ -99,7 +127,7 @@ def _per_feature_scores(features: dict, history: np.ndarray) -> List[dict]:
 
     centroid = history.mean(axis=0)
     std = history.std(axis=0)
-    std_safe = np.where(std == 0, 1.0, std)
+    std_safe = _safe_std(std, centroid)
     vector = _vector(features)[0]
 
     results = []
@@ -145,27 +173,73 @@ def operation_behavior_score(
     history = _history_matrix(samples)
     feature_scores = _per_feature_scores(features, history)
 
+    if not samples:
+        return 100.0, feature_scores, bootstrapped
+
+    # The standardized-distance detector ALWAYS runs, at every sample count.
+    # It is well behaved on the handful of samples a real user actually
+    # accumulates, it is monotonic (further from baseline always scores
+    # lower), and it is directly interpretable -- the same z-scores shown in
+    # the per-parameter breakdown. The IsolationForest below can only pull
+    # this score down, never push it up, so an anomaly this detector catches
+    # can never be masked by the forest calling it normal.
+    centroid = history.mean(axis=0)
+    std = history.std(axis=0)
+    std_safe = _safe_std(std, centroid)
+    z = np.abs((vector[0] - centroid) / std_safe)
+    # RMS, not a plain mean: typing unusually fast only shifts the 4
+    # keystroke features, leaving the 4 mouse features near-baseline. A
+    # plain average lets those unaffected features dilute a real
+    # keystroke anomaly by ~half. RMS weights large deviations more
+    # heavily so a strong anomaly in a subset of features isn't washed
+    # out by the features that were never going to move.
+    agg_z = float(np.sqrt(np.mean(z ** 2)))
+    statistical_score = float(max(0.0, 100.0 - agg_z * 20.0))
+
     if len(samples) < MIN_SAMPLES_FOR_MODEL:
-        if not samples:
-            return 100.0, feature_scores, bootstrapped
-        centroid = history.mean(axis=0)
-        std = history.std(axis=0)
-        std[std == 0] = 1.0
-        z = np.abs((vector[0] - centroid) / std)
-        mean_z = float(np.mean(z))
-        score = float(max(0.0, 100.0 - mean_z * 20.0))
-        return score, feature_scores, bootstrapped
+        return statistical_score, feature_scores, bootstrapped
 
     # model key includes the operation so "view"/"edit"/"admin" baselines
-    # for the same user never overwrite each other in the ModelStore
-    model = IsolationForest(n_estimators=100, contamination=0.15, random_state=42)
+    # for the same user never overwrite each other in the ModelStore.
+    # contamination is low, not 0.15: this history is only ever samples the
+    # engine already decided to trust (allow-decisions), so assuming 15% of
+    # it is anomalous makes the model carve a needlessly tight boundary
+    # around the user's own normal behavior.
+    model = IsolationForest(n_estimators=100, contamination=0.02, random_state=42)
     model.fit(history)
     model_store.save(f"{user_id}__{operation}" if not bootstrapped else f"{user_id}__all", model)
 
-    raw_score = model.decision_function(vector)[0]  # roughly in [-0.5, 0.5], higher = more normal
-    normalized = (raw_score + 0.5) * 100.0
-    score = float(min(100.0, max(0.0, normalized)))
-    return score, feature_scores, bootstrapped
+    # Score the new sample RELATIVE to how the user's own history scores,
+    # rather than against an assumed absolute range. decision_function does
+    # not really span [-0.5, 0.5] -- for a tight cluster it returns values
+    # near 0, so a fixed (raw + 0.5) * 100 mapping pins even perfectly
+    # consistent behavior into a ~45-60 band forever. Measuring how far
+    # below the training set's own mean anomaly score this sample falls,
+    # in units of that set's spread, is self-calibrating per user and uses
+    # the same "deviation * 20" scale as the cold-start branch above -- so
+    # crossing MIN_SAMPLES_FOR_MODEL no longer produces a scoring cliff.
+    train_scores = model.score_samples(history)
+    new_score = float(model.score_samples(vector)[0])
+    ref_mean = float(train_scores.mean())
+    # Floor is a small absolute value on the score_samples scale (which spans
+    # roughly 0.05-0.1 across a trained set). RELATIVE_STD_FLOOR is deliberately
+    # NOT used here: it is a fraction of a feature's magnitude, which is
+    # meaningful for raw features (15% of a 90ms dwell time is real jitter) but
+    # meaningless against score_samples' arbitrary ~-0.47 offset, where it would
+    # dwarf the true spread and flatten every anomaly into "normal".
+    ref_std = float(max(train_scores.std(), ISOFOREST_SCORE_STD_FLOOR))
+
+    deviation = max(0.0, (ref_mean - new_score) / ref_std)  # only penalize being MORE anomalous than usual
+    forest_score = float(max(0.0, min(100.0, 100.0 - deviation * 20.0)))
+
+    # Take the more conservative of the two detectors. The forest contributes
+    # genuine value -- it can catch odd *combinations* of features that each
+    # look individually normal, which per-feature distance cannot -- but it
+    # must not be able to vouch for a sample the statistical detector has
+    # already flagged. Measured on this feature set, the forest scored a
+    # 210ms-dwell / 420ms-flight sample (vs a 90/110 baseline) as perfectly
+    # normal; min() makes that impossible to act on.
+    return min(statistical_score, forest_score), feature_scores, bootstrapped
 
 
 def _haversine_km(lat1, lon1, lat2, lon2) -> float:
@@ -331,6 +405,11 @@ def update_trust_vector(db: DBSession, session: AuthSession, operation: str, evi
         row.trust_score = new_value
         row.updated_at = now
 
+    # the DB session has autoflush disabled, and trust_vector() (called right
+    # after this in evaluate()) reads OperationTrust back via a fresh query --
+    # without flushing here, that query misses this pending change and
+    # reports the stale value.
+    db.flush()
     return float(max(0.0, min(100.0, new_value)))
 
 
@@ -374,6 +453,35 @@ def evaluate(
         operation = "view"
 
     user_id = session.user_id
+
+    if keystroke.key_count == 0 and mouse.point_count == 0:
+        # No keyboard/mouse activity happened since the last heartbeat --
+        # this is "no data", not "abnormal data". A zero-filled feature
+        # vector compared against a non-zero baseline reads as a huge
+        # deviation, which would otherwise punish a user for the simple act
+        # of not touching the keyboard/mouse for 12s. Leave the vector
+        # completely untouched and report its current state instead of
+        # scoring this heartbeat at all.
+        current_vector = trust_vector(db, session)
+        current = next((v for v in current_vector if v["operation"] == operation), None)
+        idle_score = current["trust_score"] if current else 100.0
+        idle_decision = current["decision"] if current else "allow"
+        return {
+            "operation": operation,
+            "behavior_score": idle_score,
+            "context_score": idle_score,
+            "evidence_score": None,
+            "trust_score": idle_score,
+            "decision": idle_decision,
+            "reasons": [],
+            "features": {},
+            "feature_scores": [],
+            "context_checks": [],
+            "bootstrapped": False,
+            "trust_vector": current_vector,
+            "idle": True,
+        }
+
     features = featurize(keystroke, mouse)
     b_score, feature_scores, bootstrapped = operation_behavior_score(db, user_id, operation, features)
     c_score, reasons, context_checks = operation_context_score(db, user_id, operation, context, geo)
@@ -413,6 +521,7 @@ def evaluate(
         "context_checks": context_checks,
         "bootstrapped": bootstrapped,
         "trust_vector": trust_vector(db, session),
+        "idle": False,
     }
 
 

@@ -197,6 +197,19 @@ button.ghost:hover:not(:disabled) { background: var(--surface-2); color: var(--t
 
 .op-tab:hover:not(.active) { background: var(--surface-2); color: var(--text-h); }
 
+.loc-label { margin-left: 0.5rem; }
+
+.loc-select {
+  padding: 0.4rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-h);
+  font-size: 0.82rem;
+  font-family: var(--sans);
+  cursor: pointer;
+}
+
 .vector-panel {
   padding: 1.75rem;
   margin-bottom: 1.25rem;

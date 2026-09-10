@@ -4,9 +4,19 @@ const DECISION_LABEL = {
   terminate: "Terminated",
 };
 
+// Fallback for contexts with no decision to key off (e.g. the sparkline
+// trend line, which only has raw historical scores). Wherever a decision
+// IS available, use decisionColor instead -- per-operation thresholds mean
+// a given score number no longer maps to the same color for every operation.
 export function trustColor(score) {
   if (score >= 70) return "var(--success)";
   if (score >= 40) return "var(--warning)";
+  return "var(--danger)";
+}
+
+export function decisionColor(decision) {
+  if (decision === "allow") return "var(--success)";
+  if (decision === "stepup") return "var(--warning)";
   return "var(--danger)";
 }
 
@@ -16,7 +26,7 @@ export default function TrustGauge({ score, decision, size = 172 }) {
   const circumference = 2 * Math.PI * r;
   const clamped = Math.max(0, Math.min(100, score));
   const offset = circumference * (1 - clamped / 100);
-  const color = trustColor(clamped);
+  const color = decisionColor(decision);
 
   return (
     <div className="trust-gauge" style={{ width: size, height: size }}>

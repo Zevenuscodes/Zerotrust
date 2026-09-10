@@ -27,6 +27,9 @@ services:
       JWT_SECRET: dev-secret-change-me
       MODEL_STORE: local
       MODEL_STORE_LOCAL_DIR: /app/model_store_data
+      # Local demo only -- lets the dashboard's location picker drive the
+      # impossible-travel check. Never set this in a real deployment.
+      DEMO_LOCATION_ENABLED: "true"
     ports:
       - "8000:8000"
     volumes:

@@ -53,6 +53,8 @@ class TelemetryRequest(BaseModel):
     mouse: MouseSample
     context: ContextSample
     operation: str = "view"  # one of config.OPERATION_CLASSES
+    # demo-only, ignored unless settings.demo_location_enabled (see config)
+    simulated_location: Optional[str] = None
 
 
 class FeatureScore(BaseModel):
@@ -98,6 +100,7 @@ class SessionStatusResponse(BaseModel):
     context_checks: List[ContextCheck] = []
     trust_vector: List[OperationTrustEntry] = []
     bootstrapped: bool = False  # true if this operation didn't have enough of its own history yet
+    idle: bool = False  # true if this heartbeat had no keyboard/mouse activity and wasn't scored
 
 
 class MfaVerifyRequest(BaseModel):

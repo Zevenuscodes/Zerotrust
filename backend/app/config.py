@@ -24,12 +24,31 @@ class Settings(BaseSettings):
     # optional external IP geolocation lookup (no API key, best-effort, falls back to "unknown")
     geolocation_enabled: bool = True
 
+    # Demo-only: lets the client pick a simulated location from DEMO_LOCATIONS
+    # so the impossible-travel check can be shown live in a browser (a browser
+    # cannot set X-Forwarded-For, and localhost has no geolocatable IP).
+    # DEFAULTS TO FALSE and must stay false anywhere real: a client-controlled
+    # location would let an attacker spoof away the travel check entirely.
+    # Enabled explicitly in docker-compose.yml for local demos.
+    demo_location_enabled: bool = False
+
     class Config:
         env_file = ".env"
         protected_namespaces = ("settings_",)
 
 
 settings = Settings()
+
+
+# Fixed set of demo locations, resolved server-side to a representative public
+# IP that the normal geolocation path then looks up. Deliberately a closed
+# allow-list rather than an arbitrary client-supplied IP, so even with the
+# demo flag on, the blast radius is three known coordinates.
+DEMO_LOCATIONS = {
+    "mumbai": "49.36.0.1",
+    "london": "81.2.69.142",
+    "new_york": "8.8.8.8",
+}
 
 
 # --- Operation-conditioned trust model -------------------------------------

@@ -1,4 +1,4 @@
-import { trustColor } from "./TrustGauge";
+import { decisionColor } from "./TrustGauge";
 
 const OPERATION_LABELS = { view: "View", edit: "Edit", admin: "Admin" };
 
@@ -16,7 +16,7 @@ export default function TrustVectorPanel({ vector, activeOperation, onSelect }) 
       </p>
       <div className="vector-row">
         {vector.map((v) => {
-          const color = trustColor(v.trust_score);
+          const color = decisionColor(v.decision);
           const active = v.operation === activeOperation;
           return (
             <button

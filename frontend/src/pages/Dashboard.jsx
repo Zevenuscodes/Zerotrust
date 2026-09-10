@@ -16,10 +16,21 @@ const HISTORY_LENGTH = 20;
 const OPERATIONS = ["view", "edit", "admin"];
 const OPERATION_LABELS = { view: "View", edit: "Edit", admin: "Admin" };
 
+// Demo control: the backend only honours these when DEMO_LOCATION_ENABLED is
+// set (off by default). Lets the impossible-travel check be shown live --
+// pick Mumbai, wait for a heartbeat, then switch to New York.
+const LOCATIONS = [
+  { value: "", label: "Real IP" },
+  { value: "mumbai", label: "Mumbai" },
+  { value: "london", label: "London" },
+  { value: "new_york", label: "New York" },
+];
+
 const DECISION_ICON = { allow: "✓", stepup: "!", terminate: "✕" };
 
 export default function Dashboard() {
   const [operation, setOperation] = useState("view");
+  const [location, setLocation] = useState("");
   const [trustVector, setTrustVector] = useState([]);
   const [decision, setDecision] = useState("allow");
   const [reasons, setReasons] = useState([]);
@@ -39,6 +50,8 @@ export default function Dashboard() {
   const scratchRef = useRef(null);
   const operationRef = useRef(operation);
   operationRef.current = operation;
+  const locationRef = useRef(location);
+  locationRef.current = location;
   const navigate = useNavigate();
   const { username, logout } = useAuth();
 
@@ -64,17 +77,30 @@ export default function Dashboard() {
         const context = getContextInfo();
         const activeOperation = operationRef.current;
 
-        const resp = await api.telemetry({ keystroke, mouse, context, operation: activeOperation });
+        const resp = await api.telemetry({
+          keystroke,
+          mouse,
+          context,
+          operation: activeOperation,
+          simulated_location: locationRef.current || null,
+        });
         setDecision(resp.decision);
-        setReasons(resp.reasons || []);
-        setFeatureScores(resp.feature_scores || []);
-        setContextChecks(resp.context_checks || []);
-        setBootstrapped(resp.bootstrapped);
         setTrustVector(resp.trust_vector || []);
-        setHistory((h) => ({
-          ...h,
-          [resp.operation]: [...(h[resp.operation] || []), resp.trust_score].slice(-HISTORY_LENGTH),
-        }));
+
+        // An idle heartbeat (no typing/mouse movement since the last one)
+        // isn't scored at all -- keep showing the last real evaluation's
+        // breakdown instead of blanking it out every 12s while you're just
+        // reading the screen.
+        if (!resp.idle) {
+          setReasons(resp.reasons || []);
+          setFeatureScores(resp.feature_scores || []);
+          setContextChecks(resp.context_checks || []);
+          setBootstrapped(resp.bootstrapped);
+          setHistory((h) => ({
+            ...h,
+            [resp.operation]: [...(h[resp.operation] || []), resp.trust_score].slice(-HISTORY_LENGTH),
+          }));
+        }
 
         if (resp.decision === "terminate") {
           clearInterval(interval);
@@ -189,6 +215,17 @@ export default function Dashboard() {
               </button>
             ))}
           </div>
+
+          <span className="muted loc-label">Location:</span>
+          <select
+            className="loc-select"
+            value={location}
+            onChange={(e) => setLocation(e.target.value)}
+          >
+            {LOCATIONS.map((l) => (
+              <option key={l.value} value={l.value}>{l.label}</option>
+            ))}
+          </select>
         </section>
 
         <section className="trust-panel card">
