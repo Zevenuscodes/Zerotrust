@@ -7,7 +7,8 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 30
 
-    # trust score policy thresholds
+    # trust score policy thresholds (legacy global fallback; superseded by
+    # OPERATION_CONFIG's per-operation thresholds below)
     trust_allow_threshold: float = 70.0
     trust_stepup_threshold: float = 40.0
 
@@ -29,3 +30,68 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# --- Operation-conditioned trust model -------------------------------------
+#
+# Novelty pivot: instead of one scalar trust score with one global behavioral
+# baseline per user, trust is tracked as a VECTOR -- one component per
+# operation class -- each backed by its own behavioral baseline, decay rate,
+# context weights, and decision thresholds. A device/location anomaly that's
+# a minor ding on "view" is a much bigger ding on "admin"; typing behavior
+# while composing a report is not the same distribution as typing behavior
+# while deleting records, so scoring them against one shared baseline is
+# exactly where false positives/negatives concentrate on the operations that
+# matter most.
+#
+# decay_rate (lambda, per second) sets how "sticky" trust is for that
+# operation class: T_r(t) = T_r(t-1)*e^(-lambda*dt) + (1-e^(-lambda*dt))*evidence
+# A small lambda (view) means old trust persists for minutes; a large lambda
+# (admin) means trust must be re-earned almost every heartbeat.
+#
+# device_weight / location_weight are the per-operation versions of the
+# fixed -30 / -50 context penalties the original scalar model used for every
+# operation alike.
+#
+# allow_threshold / stepup_threshold replace the single global
+# trust_allow_threshold / trust_stepup_threshold with per-operation values --
+# an unfamiliar device is tolerated on "view" but not on "admin".
+#
+# These numeric defaults are project design choices (same status as the
+# original 0.6/0.4 behavior/context split), not values derived from a
+# calibration run -- see risk_engine.suggest_threshold_calibration() for a
+# starter, audit-log-driven method to tune them, per the "no concrete
+# calibration method" gap this model is meant to close.
+OPERATION_CLASSES = ["view", "edit", "admin"]
+
+OPERATION_CONFIG = {
+    "view": {
+        "decay_rate": 0.006,  # ~115s half-life -- slow to change
+        "device_weight": 10.0,
+        "location_weight": 15.0,
+        "allow_threshold": 55.0,
+        "stepup_threshold": 35.0,
+    },
+    "edit": {
+        "decay_rate": 0.02,  # ~35s half-life
+        "device_weight": 25.0,
+        "location_weight": 35.0,
+        "allow_threshold": 65.0,
+        "stepup_threshold": 45.0,
+    },
+    "admin": {
+        "decay_rate": 0.06,  # ~11.5s half-life -- must be re-earned almost every heartbeat
+        "device_weight": 45.0,
+        "location_weight": 60.0,
+        "allow_threshold": 75.0,
+        "stepup_threshold": 55.0,
+    },
+}
+
+# operation-sequence anomaly (Section 5's "navigation flow" signal, actually
+# used): a transition seen fewer than this fraction of the user's times
+# leaving `from_operation` is treated as an unusual jump (e.g. straight to
+# "admin" without the user's usual path through "view").
+TRANSITION_MIN_HISTORY = 5
+TRANSITION_RARE_FREQUENCY = 0.1
+TRANSITION_MAX_PENALTY = 20.0

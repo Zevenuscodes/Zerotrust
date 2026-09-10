@@ -8,18 +8,27 @@ import { getContextInfo } from "../telemetry/fingerprint";
 import TrustGauge from "../components/TrustGauge";
 import Sparkline from "../components/Sparkline";
 import Brand from "../components/Brand";
+import ParameterBreakdown from "../components/ParameterBreakdown";
+import TrustVectorPanel from "../components/TrustVectorPanel";
 
 const TELEMETRY_INTERVAL_MS = 12000;
 const HISTORY_LENGTH = 20;
+const OPERATIONS = ["view", "edit", "admin"];
+const OPERATION_LABELS = { view: "View", edit: "Edit", admin: "Admin" };
 
 const DECISION_ICON = { allow: "✓", stepup: "!", terminate: "✕" };
 
 export default function Dashboard() {
-  const [trustScore, setTrustScore] = useState(100);
+  const [operation, setOperation] = useState("view");
+  const [trustVector, setTrustVector] = useState([]);
   const [decision, setDecision] = useState("allow");
   const [reasons, setReasons] = useState([]);
-  const [history, setHistory] = useState([100]);
+  const [history, setHistory] = useState({ view: [100], edit: [100], admin: [100] });
+  const [featureScores, setFeatureScores] = useState([]);
+  const [contextChecks, setContextChecks] = useState([]);
+  const [bootstrapped, setBootstrapped] = useState(false);
   const [mfaOpen, setMfaOpen] = useState(false);
+  const [mfaOperation, setMfaOperation] = useState(null);
   const [otp, setOtp] = useState("");
   const [mfaError, setMfaError] = useState("");
   const [terminated, setTerminated] = useState(false);
@@ -28,8 +37,16 @@ export default function Dashboard() {
   const keystrokeTracker = useRef(createKeystrokeTracker());
   const mouseTracker = useRef(createMouseTracker());
   const scratchRef = useRef(null);
+  const operationRef = useRef(operation);
+  operationRef.current = operation;
   const navigate = useNavigate();
   const { username, logout } = useAuth();
+
+  useEffect(() => {
+    api.status().then((resp) => {
+      if (resp.trust_vector?.length) setTrustVector(resp.trust_vector);
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     const detachMouse = mouseTracker.current.attach(document);
@@ -45,18 +62,26 @@ export default function Dashboard() {
         const keystroke = keystrokeTracker.current.snapshot();
         const mouse = mouseTracker.current.snapshot();
         const context = getContextInfo();
+        const activeOperation = operationRef.current;
 
-        const resp = await api.telemetry({ keystroke, mouse, context });
-        setTrustScore(resp.trust_score);
+        const resp = await api.telemetry({ keystroke, mouse, context, operation: activeOperation });
         setDecision(resp.decision);
         setReasons(resp.reasons || []);
-        setHistory((h) => [...h, resp.trust_score].slice(-HISTORY_LENGTH));
+        setFeatureScores(resp.feature_scores || []);
+        setContextChecks(resp.context_checks || []);
+        setBootstrapped(resp.bootstrapped);
+        setTrustVector(resp.trust_vector || []);
+        setHistory((h) => ({
+          ...h,
+          [resp.operation]: [...(h[resp.operation] || []), resp.trust_score].slice(-HISTORY_LENGTH),
+        }));
 
         if (resp.decision === "terminate") {
           clearInterval(interval);
           setTerminated(true);
         } else if (resp.decision === "stepup") {
           setMfaOpen(true);
+          setMfaOperation(resp.operation);
         }
       } catch (err) {
         if (err.status === 403) {
@@ -82,9 +107,12 @@ export default function Dashboard() {
       if (resp.verified) {
         setMfaOpen(false);
         setOtp("");
-        setTrustScore(resp.trust_score);
         setDecision("allow");
-        setHistory((h) => [...h, resp.trust_score].slice(-HISTORY_LENGTH));
+        setTrustVector((v) => v.map((entry) => (entry.operation === resp.operation ? { ...entry, trust_score: resp.trust_score, decision: "allow" } : entry)));
+        setHistory((h) => ({
+          ...h,
+          [resp.operation]: [...(h[resp.operation] || []), resp.trust_score].slice(-HISTORY_LENGTH),
+        }));
       } else {
         setMfaError("Incorrect code. Try again.");
       }
@@ -101,6 +129,13 @@ export default function Dashboard() {
     }
     logout();
     navigate("/login");
+  }
+
+  function handleSelectOperation(op) {
+    setOperation(op);
+    setFeatureScores([]);
+    setContextChecks([]);
+    setReasons([]);
   }
 
   if (terminated) {
@@ -126,6 +161,9 @@ export default function Dashboard() {
     );
   }
 
+  const activeEntry = trustVector.find((v) => v.operation === operation);
+  const activeScore = activeEntry ? activeEntry.trust_score : 100;
+
   return (
     <div className="page-shell">
       <div className="dashboard">
@@ -137,17 +175,38 @@ export default function Dashboard() {
           </div>
         </header>
 
+        <section className="op-select">
+          <span className="muted">Simulating operation:</span>
+          <div className="op-tabs">
+            {OPERATIONS.map((op) => (
+              <button
+                key={op}
+                className={`op-tab ${operation === op ? "active" : ""}`}
+                onClick={() => handleSelectOperation(op)}
+                type="button"
+              >
+                {OPERATION_LABELS[op]}
+              </button>
+            ))}
+          </div>
+        </section>
+
         <section className="trust-panel card">
-          <TrustGauge score={trustScore} decision={decision} />
+          <TrustGauge score={activeScore} decision={decision} />
           <div className="trust-info">
-            <h2>Live trust score</h2>
+            <h2>Trust for "{OPERATION_LABELS[operation]}"</h2>
             <div className={`decision-badge ${decision}`}>
               <span>{DECISION_ICON[decision]}</span> {decision}
             </div>
             <div className="trust-history">
-              <Sparkline values={history} />
-              <span className="muted">last {history.length} heartbeats</span>
+              <Sparkline values={history[operation] || [100]} />
+              <span className="muted">last {(history[operation] || []).length} heartbeats for this operation</span>
             </div>
+            {bootstrapped && (
+              <p className="muted" style={{ marginBottom: 6 }}>
+                Not enough "{operation}"-specific history yet — bootstrapping from your overall behavior.
+              </p>
+            )}
             {reasons.length > 0 && (
               <ul className="reasons">
                 {reasons.map((r, i) => (
@@ -158,12 +217,17 @@ export default function Dashboard() {
           </div>
         </section>
 
+        <TrustVectorPanel vector={trustVector} activeOperation={operation} onSelect={handleSelectOperation} />
+
+        <ParameterBreakdown featureScores={featureScores} contextChecks={contextChecks} />
+
         <section className="scratch-panel card">
           <h2>Keep typing/moving to feed your behavior profile</h2>
           <p className="muted">
-            Telemetry is sent every {TELEMETRY_INTERVAL_MS / 1000}s. Try typing
-            normally, then try typing very differently (or open this app on
-            another device/browser) to see the trust score react.
+            Telemetry is sent every {TELEMETRY_INTERVAL_MS / 1000}s, tagged with
+            whichever operation is selected above. Each operation learns its own
+            baseline — try typing normally on "View", then switch to "Admin" and
+            type very differently to see only that component react.
           </p>
           <textarea
             ref={scratchRef}
@@ -179,8 +243,9 @@ export default function Dashboard() {
             <div className="modal card">
               <h2>Step-up verification required</h2>
               <p className="muted">
-                Your trust score dropped into the medium-risk range. Enter the
-                one-time code to continue.
+                Trust for "{OPERATION_LABELS[mfaOperation] || mfaOperation}" dropped into
+                the medium-risk range. Enter the one-time code to re-earn trust for
+                this operation. (Other operations are unaffected.)
               </p>
               <p className="muted">(Demo OTP: 123456)</p>
               <form onSubmit={handleMfaSubmit}>
