@@ -161,7 +161,7 @@ check("consistent typing never scored below 55", lo >= 55, f"lowest was {lo:.1f}
 
 b_fast = beat(token, "view", keystroke=ks(dwell=32, flight=25, count=30))[1]["behavior_score"]
 check("3x faster typing scored as anomalous", b_fast < 60, f"got {b_fast:.1f}")
-b_slow = beat(token, "view", keystroke=ks(dwell=210, flight=420, count=8))[1]["behavior_score"]
+b_slow = beat(token, "view", keystroke=ks(dwell=210, flight=420, count=25))[1]["behavior_score"]
 check("very slow typing scored as anomalous", b_slow < 60, f"got {b_slow:.1f}")
 b_mild = beat(token, "view", keystroke=ks(dwell=100, flight=102))[1]["behavior_score"]
 check("mild natural drift still trusted", b_mild >= 55, f"got {b_mild:.1f}")
@@ -181,13 +181,17 @@ feats = {f["name"]: f for f in b["feature_scores"]}
 check("mousing with no typing is not penalised", b["behavior_score"] >= 90, f"got {b['behavior_score']:.1f}")
 check("keystroke features marked not-observed", feats["mean_dwell_ms"]["observed"] is False)
 
+check("a too-small keystroke burst is not judged",
+      beat(new_user("tiny")[1], "view", keystroke=ks(dwell=300, flight=600, count=3))[1]["behavior_score"] >= 90,
+      "a 3-key burst should be treated as unmeasured, not as an anomaly")
+
 # --- trust actually responds -----------------------------------------------
 print("\ntrust responsiveness")
 _, token, _ = new_user("resp")
 start = beat(token, "view")[1]["trust_score"]
 beats_to_stepup = None
 for i in range(1, 11):
-    bad = beat(token, "view", keystroke=ks(dwell=300, flight=600, count=5))[1]
+    bad = beat(token, "view", keystroke=ks(dwell=300, flight=600, count=25))[1]
     if bad["decision"] != "allow" and beats_to_stepup is None:
         beats_to_stepup = i
 check("sustained anomaly moves trust down", bad["trust_score"] < start - 10,
@@ -198,7 +202,7 @@ check("anomaly leaves 'allow' on view within 10 beats", beats_to_stepup is not N
 # admin is the strict end of the gradient: it must react far faster than view
 _, token_a, _ = new_user("resp_admin")
 beat(token_a, "admin")
-admin_bad = beat(token_a, "admin", keystroke=ks(dwell=300, flight=600, count=5))[1]
+admin_bad = beat(token_a, "admin", keystroke=ks(dwell=300, flight=600, count=25))[1]
 check("admin reacts to the same anomaly within 1 beat", admin_bad["decision"] != "allow",
       f"{admin_bad['decision']} at {admin_bad['trust_score']:.1f}")
 check("view is more forgiving than admin", (beats_to_stepup or 99) > 1,
@@ -214,7 +218,7 @@ print("\nanti-poisoning")
 _, token, _ = new_user("poison")
 scores = []
 for _ in range(6):
-    scores.append(beat(token, "view", keystroke=ks(dwell=300, flight=600, count=5))[1]["behavior_score"])
+    scores.append(beat(token, "view", keystroke=ks(dwell=300, flight=600, count=25))[1]["behavior_score"])
 check("repeated anomalies are not learned as normal", scores[-1] <= scores[0] + 10,
       f"first={scores[0]:.1f} last={scores[-1]:.1f}")
 
@@ -259,7 +263,7 @@ print("\nmid-session revocation")
 _, token, _ = new_user("term")
 killed = False
 for _ in range(8):
-    s, b = beat(token, "admin", keystroke=ks(dwell=300, flight=600, count=5), mouse=ms(vel=9.5))
+    s, b = beat(token, "admin", keystroke=ks(dwell=300, flight=600, count=25), mouse=ms(vel=9.5))
     if s == 403 or (s == 200 and b.get("decision") == "terminate"):
         killed = True
         break

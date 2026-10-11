@@ -2,6 +2,14 @@
 // keyup->next keydown) from whatever element it's attached to, and reduces
 // the rolling buffer to a small feature vector the backend risk engine scores.
 
+// A gap this long between keys is the user stopping to think, read, or walk
+// away -- not part of their typing rhythm. Including pauses made flight time
+// wildly noisy (real sessions produced means from 170ms to 866ms), which
+// inflated the baseline's spread so far that no typing speed looked unusual
+// any more. Same idea for a key held down far longer than any normal press.
+const MAX_FLIGHT_MS = 750;
+const MAX_DWELL_MS = 400;
+
 export function createKeystrokeTracker() {
   const dwellTimes = [];
   const flightTimes = [];
@@ -18,11 +26,13 @@ export function createKeystrokeTracker() {
     const downTime = downTimestamps.get(e.key);
     const upTime = performance.now();
     if (downTime !== undefined) {
-      dwellTimes.push(upTime - downTime);
+      const dwell = upTime - downTime;
+      if (dwell <= MAX_DWELL_MS) dwellTimes.push(dwell);
       downTimestamps.delete(e.key);
     }
     if (lastUpTime !== null) {
-      flightTimes.push(upTime - lastUpTime);
+      const flight = upTime - lastUpTime;
+      if (flight <= MAX_FLIGHT_MS) flightTimes.push(flight);
     }
     lastUpTime = upTime;
   }

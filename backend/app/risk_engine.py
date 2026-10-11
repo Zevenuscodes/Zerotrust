@@ -79,6 +79,13 @@ FEATURE_ORDER = [
 KEYSTROKE_FEATURES = {"mean_dwell_ms", "std_dwell_ms", "mean_flight_ms", "std_flight_ms"}
 MOUSE_FEATURES = {"mean_velocity", "std_velocity", "mean_acceleration", "direction_changes"}
 
+# A handful of events gives a meaningless average -- a 3-key burst says
+# nothing about someone's typing rhythm, but it still lands in the baseline
+# and widens its spread. Below these counts the modality is treated as not
+# measured for this sample (same path as not touching it at all).
+MIN_KEYS_FOR_SIGNAL = 8
+MIN_POINTS_FOR_SIGNAL = 15
+
 # km/h an implied-travel-speed above this is not humanly possible between two logins
 IMPOSSIBLE_TRAVEL_KMH = 900.0
 EARTH_RADIUS_KM = 6371.0
@@ -103,23 +110,23 @@ def featurize(keystroke: KeystrokeSample, mouse: MouseSample) -> dict:
 
 
 def present_features(features: dict) -> List[str]:
-    """Which of FEATURE_ORDER this sample actually observed."""
+    """Which of FEATURE_ORDER this sample measured enough events to trust."""
     present = []
-    if features.get("key_count", 0) > 0:
+    if features.get("key_count", 0) >= MIN_KEYS_FOR_SIGNAL:
         present += [f for f in FEATURE_ORDER if f in KEYSTROKE_FEATURES]
-    if features.get("point_count", 0) > 0:
+    if features.get("point_count", 0) >= MIN_POINTS_FOR_SIGNAL:
         present += [f for f in FEATURE_ORDER if f in MOUSE_FEATURES]
     return present
 
 
 def _sample_has(sample_features: dict, feature: str) -> bool:
-    """Did a stored history sample observe the modality this feature belongs to?
-    Samples written before modality tracking carry no counts; treat those as
-    present so existing baselines keep working."""
+    """Did a stored history sample measure enough of this feature's modality
+    to belong in its baseline? Samples written before modality tracking carry
+    no counts; treat those as present so existing baselines keep working."""
     if feature in KEYSTROKE_FEATURES:
-        return sample_features.get("key_count", 1) > 0
+        return sample_features.get("key_count", MIN_KEYS_FOR_SIGNAL) >= MIN_KEYS_FOR_SIGNAL
     if feature in MOUSE_FEATURES:
-        return sample_features.get("point_count", 1) > 0
+        return sample_features.get("point_count", MIN_POINTS_FOR_SIGNAL) >= MIN_POINTS_FOR_SIGNAL
     return True
 
 
@@ -152,10 +159,23 @@ def _safe_std(std: np.ndarray, mean: np.ndarray) -> np.ndarray:
     return np.maximum(std, np.maximum(RELATIVE_STD_FLOOR * np.abs(mean), ABSOLUTE_STD_FLOOR))
 
 
+# Scales median-absolute-deviation to be comparable to a standard deviation
+# for normally distributed data, so the same "z * 20" scoring curve applies.
+MAD_TO_STD = 1.4826
+
+
 def _feature_baseline(samples: List[BehaviorSample], feature: str) -> Tuple[Optional[float], float]:
-    """Mean/std of one feature over only the history samples that actually
-    observed its modality, so a run of keyboard-only samples can't drag the
-    mouse baseline toward zero (or vice versa)."""
+    """Centre and spread of one feature, over only the history samples that
+    actually observed its modality (so keyboard-only samples can't drag the
+    mouse baseline toward zero, or vice versa).
+
+    Uses median + MAD rather than mean + std because this history is real
+    human behavior and contains outliers: one distracted sample with a long
+    pause permanently inflated an std-based spread, and a spread that wide
+    makes every later sample look normal no matter how fast or slow it is.
+    A measured session reached std=430ms on flight time, which meant the
+    user had to pause over 1.2s between keys before anything registered.
+    The median and MAD simply ignore those few extreme samples."""
     vals = [
         float(s.features.get(feature, 0.0))
         for s in samples
@@ -164,7 +184,9 @@ def _feature_baseline(samples: List[BehaviorSample], feature: str) -> Tuple[Opti
     if not vals:
         return None, 0.0
     arr = np.array(vals, dtype=float)
-    return float(arr.mean()), float(arr.std())
+    centre = float(np.median(arr))
+    mad = float(np.median(np.abs(arr - centre)))
+    return centre, mad * MAD_TO_STD
 
 
 def _per_feature_scores(features: dict, samples: List[BehaviorSample]) -> List[dict]:
