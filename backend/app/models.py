@@ -112,6 +112,22 @@ class KnownContext(Base):
     user = relationship("User", back_populates="known_contexts")
 
 
+class PhraseSample(Base):
+    """One attempt at typing the enrollment phrase, stored as per-character
+    dwell times and per-digraph flight times. Because every attempt covers
+    the same characters in the same order, these line up position-by-position
+    and can be compared like-for-like -- which is what makes them carry
+    identity, unlike averages over arbitrary free text."""
+
+    __tablename__ = "phrase_samples"
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False)
+    phrase = Column(String, nullable=False)
+    timings = Column(JSON, nullable=False)  # {phrase, dwell_ms[], flight_ms[]}
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class OperationTrust(Base):
     """One component of the trust VECTOR: this session's current trust level
     for one specific operation class, decayed lazily (on each update) using

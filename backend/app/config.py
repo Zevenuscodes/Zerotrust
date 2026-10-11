@@ -20,6 +20,24 @@ class Settings(BaseSettings):
     # decision (which also reflects context and accumulated trust).
     learn_min_behavior_score: float = 70.0
 
+    # Fixed-phrase step-up challenge. The phrase is typed repeatedly at
+    # registration to build a per-character timing profile; a later attempt
+    # must score at least this to pass. Tune with
+    # backend/tests/eval_accuracy.py, which reports FAR/FRR/EER for a given
+    # threshold rather than leaving it guessed at.
+    phrase_enrollment_count: int = 3
+    # Placed midway through the observed separation rather than guessed.
+    # Against simulated typists (backend/tests/test_phrase_separation.py)
+    # genuine attempts score 84-87 and impostors 48-71 -- including one with
+    # the same average typing speed but a different per-character signature,
+    # which plain averaging would miss entirely. 78 sits in that 71-84 gap,
+    # giving FRR 0% / FAR 0% there; at 70 the matching-speed impostor got
+    # through 1 attempt in 4.
+    # Real users vary more than a simulation, so recalibrate on real
+    # genuine-vs-impostor data with backend/tests/eval_accuracy.py before
+    # treating this as a validated number.
+    phrase_verify_threshold: float = 78.0
+
     # ModelStore backend: "local" (dev) or "s3" (prod/AWS)
     model_store: str = "local"
     model_store_local_dir: str = "./model_store_data"

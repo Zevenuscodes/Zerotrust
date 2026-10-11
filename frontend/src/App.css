@@ -96,6 +96,35 @@
   line-height: 1.5;
 }
 
+.enroll-progress {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.8rem;
+}
+
+.enroll-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.enroll-dot.filled {
+  background: var(--success);
+  border-color: var(--success);
+}
+
+.modal .passphrase {
+  font-size: 0.78rem;
+  margin-bottom: 0.6rem;
+}
+
+.auth-footer a {
+  cursor: pointer;
+}
+
 .auth-footer {
   margin-top: 1.25rem;
   font-size: 0.85rem;

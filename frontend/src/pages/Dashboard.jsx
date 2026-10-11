@@ -10,6 +10,9 @@ import Sparkline from "../components/Sparkline";
 import Brand from "../components/Brand";
 import ParameterBreakdown from "../components/ParameterBreakdown";
 import TrustVectorPanel from "../components/TrustVectorPanel";
+import { createPhraseTracker } from "../telemetry/phrase";
+
+const CHALLENGE_PHRASE = "the quick zero trust fox verifies every packet";
 
 const TELEMETRY_INTERVAL_MS = 12000;
 const HISTORY_LENGTH = 20;
@@ -42,12 +45,20 @@ export default function Dashboard() {
   const [mfaOperation, setMfaOperation] = useState(null);
   const [otp, setOtp] = useState("");
   const [mfaError, setMfaError] = useState("");
+  const [challengeTyped, setChallengeTyped] = useState("");
+  const [phraseScore, setPhraseScore] = useState(null);
+  const [useOtpFallback, setUseOtpFallback] = useState(false);
   const [terminated, setTerminated] = useState(false);
   const [scratch, setScratch] = useState("");
 
   const keystrokeTracker = useRef(createKeystrokeTracker());
   const mouseTracker = useRef(createMouseTracker());
   const scratchRef = useRef(null);
+  const challengeRef = useRef(null);
+  const submitPhraseRef = useRef(null);
+  const challengeTracker = useRef(
+    createPhraseTracker(CHALLENGE_PHRASE, (sample) => submitPhraseRef.current?.(sample))
+  );
   const operationRef = useRef(operation);
   operationRef.current = operation;
   const locationRef = useRef(location);
@@ -105,9 +116,13 @@ export default function Dashboard() {
         if (resp.decision === "terminate") {
           clearInterval(interval);
           setTerminated(true);
-        } else if (resp.decision === "stepup") {
+        } else if (resp.mfa_pending) {
+          // Keyed off the session's pending flag, not this beat's decision:
+          // a challenge raised on one operation stays pending while the user
+          // works on another, and would otherwise be invisible (and
+          // impossible to clear) after switching tabs.
           setMfaOpen(true);
-          setMfaOperation(resp.operation);
+          setMfaOperation(resp.mfa_pending_operation || resp.operation);
         }
       } catch (err) {
         if (err.status === 403) {
@@ -124,6 +139,41 @@ export default function Dashboard() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Step-up by re-typing the enrolled phrase: scored against the user's own
+  // per-character rhythm, so it tests who is at the keyboard rather than
+  // just whether they know a code. Driven from the tracker's completion
+  // callback (final keyup), not onChange -- see phrase.js.
+  async function submitPhraseAttempt(sample) {
+    setChallengeTyped("");
+    if (!sample) {
+      setMfaError("Type it straight through, without corrections.");
+      return;
+    }
+    setMfaError("");
+    try {
+      const resp = await api.verifyPhrase(sample);
+      if (resp.verified) {
+        setMfaOpen(false);
+        setDecision("allow");
+        setPhraseScore(null);
+        setTrustVector((v) =>
+          v.map((entry) =>
+            entry.operation === resp.operation
+              ? { ...entry, trust_score: resp.trust_score, decision: "allow" }
+              : entry
+          )
+        );
+      } else {
+        setPhraseScore(resp.phrase_score);
+        setMfaError(
+          `Typing rhythm didn't match (${resp.phrase_score.toFixed(0)} vs ${resp.threshold} needed).`
+        );
+      }
+    } catch (err) {
+      setMfaError(err.message || "Verification failed");
+    }
+  }
 
   async function handleMfaSubmit(e) {
     e.preventDefault();
@@ -156,6 +206,18 @@ export default function Dashboard() {
     logout();
     navigate("/login");
   }
+
+  // Kept in a ref so the tracker's completion callback, created once, always
+  // calls the current closure rather than a stale one.
+  submitPhraseRef.current = submitPhraseAttempt;
+
+  // The challenge input only exists while the modal is open, so the tracker
+  // has to be attached when it mounts rather than once on page load.
+  useEffect(() => {
+    if (!mfaOpen || useOtpFallback || !challengeRef.current) return undefined;
+    challengeTracker.current.reset();
+    return challengeTracker.current.attach(challengeRef.current);
+  }, [mfaOpen, useOtpFallback]);
 
   function handleSelectOperation(op) {
     setOperation(op);
@@ -272,19 +334,42 @@ export default function Dashboard() {
               <h2>Verify to continue</h2>
               <p className="muted">
                 Trust for "{OPERATION_LABELS[mfaOperation] || mfaOperation}" dropped into the
-                medium-risk range. Demo OTP: 123456
+                medium-risk range.
               </p>
-              <form onSubmit={handleMfaSubmit}>
-                <input
-                  value={otp}
-                  onChange={(e) => setOtp(e.target.value)}
-                  placeholder="6-digit code"
-                  maxLength={6}
-                  autoFocus
-                />
-                {mfaError && <p className="error">{mfaError}</p>}
-                <button type="submit">Verify</button>
-              </form>
+
+              {!useOtpFallback ? (
+                <>
+                  <p className="muted">Re-type your enrolled phrase:</p>
+                  <code className="passphrase">{CHALLENGE_PHRASE}</code>
+                  <input
+                    ref={challengeRef}
+                    value={challengeTyped}
+                    onChange={(e) => setChallengeTyped(e.target.value)}
+                    placeholder="Type the phrase above"
+                    autoFocus
+                  />
+                  {phraseScore !== null && (
+                    <p className="muted">Match score: {phraseScore.toFixed(0)}</p>
+                  )}
+                  {mfaError && <p className="error">{mfaError}</p>}
+                  <p className="auth-footer">
+                    <a onClick={() => { setUseOtpFallback(true); setMfaError(""); }}>Use a code instead</a>
+                  </p>
+                </>
+              ) : (
+                <form onSubmit={handleMfaSubmit}>
+                  <p className="muted">Demo OTP: 123456</p>
+                  <input
+                    value={otp}
+                    onChange={(e) => setOtp(e.target.value)}
+                    placeholder="6-digit code"
+                    maxLength={6}
+                    autoFocus
+                  />
+                  {mfaError && <p className="error">{mfaError}</p>}
+                  <button type="submit">Verify</button>
+                </form>
+              )}
             </div>
           </div>
         )}

@@ -42,5 +42,6 @@ export const api = {
   telemetry: (payload) => request("/session/telemetry", { method: "POST", body: payload, auth: true }),
   status: () => request("/session/status", { auth: true }),
   verifyMfa: (otp) => request("/session/mfa/verify", { method: "POST", body: { otp }, auth: true }),
+  verifyPhrase: (timings) => request("/session/phrase/verify", { method: "POST", body: { timings }, auth: true }),
   logout: () => request("/session/logout", { method: "POST", auth: true }),
 };

@@ -4,9 +4,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session as DBSession
 
 from app.database import get_db
-from app.models import User, BehaviorSample, AuthSession, KnownContext
+from app.models import User, BehaviorSample, AuthSession, KnownContext, PhraseSample
 from app.net_utils import client_ip
 from app.geolocation import lookup as geo_lookup
+from app.phrase_auth import valid_attempt
 from app.risk_engine import featurize
 from app.schemas import RegisterRequest, LoginRequest, TokenResponse
 from app.security import hash_password, verify_password, create_access_token
@@ -55,6 +56,13 @@ def register(payload: RegisterRequest, request: Request, db: DBSession = Depends
 
     features = featurize(payload.keystroke, payload.mouse)
     db.add(BehaviorSample(user_id=user.id, sample_type="baseline", features=features))
+
+    # Fixed-phrase biometric enrollment. Only complete, typo-free attempts
+    # are stored, since scoring aligns timings position-by-position.
+    for enrollment in payload.phrase_enrollments:
+        attempt = enrollment.model_dump()
+        if valid_attempt(attempt, enrollment.phrase):
+            db.add(PhraseSample(user_id=user.id, phrase=enrollment.phrase, timings=attempt))
     db.commit()
 
     ip = client_ip(request)

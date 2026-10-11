@@ -25,12 +25,38 @@ class ContextSample(BaseModel):
     timezone: Optional[str] = None
 
 
+class PhraseTimings(BaseModel):
+    """Per-character timings for one attempt at the enrollment phrase.
+    Index i of each list corresponds to phrase[i]; flight_ms[0] is null
+    since there is no preceding key."""
+
+    phrase: str
+    dwell_ms: List[Optional[float]]
+    flight_ms: List[Optional[float]] = []
+
+
 class RegisterRequest(BaseModel):
     username: str
     password: str
     keystroke: KeystrokeSample
     mouse: MouseSample
     context: ContextSample
+    # Repeated attempts at the fixed phrase, used to build the biometric
+    # profile that the step-up challenge later verifies against.
+    phrase_enrollments: List[PhraseTimings] = []
+
+
+class PhraseVerifyRequest(BaseModel):
+    timings: PhraseTimings
+
+
+class PhraseVerifyResponse(BaseModel):
+    verified: bool
+    phrase_score: float
+    threshold: float
+    operation: Optional[str] = None
+    trust_score: Optional[float] = None
+    detail: dict = {}
 
 
 class LoginRequest(BaseModel):
@@ -99,6 +125,10 @@ class SessionStatusResponse(BaseModel):
     context_score: float
     decision: str  # allow | stepup | terminate
     mfa_pending: bool
+    # Which operation raised the pending challenge. A challenge raised on
+    # one operation stays pending while the user works on another, so the
+    # UI needs to know what to name -- and that a challenge exists at all.
+    mfa_pending_operation: Optional[str] = None
     reasons: List[str] = []
     feature_scores: List[FeatureScore] = []
     context_checks: List[ContextCheck] = []

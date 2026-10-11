@@ -10,6 +10,7 @@ lived.
 """
 
 import json
+import random
 import os
 import sys
 import time
@@ -271,6 +272,74 @@ check("sustained anomaly terminates the session", killed)
 if killed:
     s, _ = beat(token, "view")
     check("unexpired JWT rejected after termination", s == 403, f"got {s}")
+
+# --- fixed-phrase step-up --------------------------------------------------
+print("\nfixed-phrase biometric step-up")
+PHRASE = "the quick zero trust fox verifies every packet"
+
+
+def phrase_sample(dwell=95.0, flight=150.0, seed=0):
+    """Deterministic per-character timings, so a 'genuine' attempt matches
+    enrollment and an attempt with a different profile does not."""
+    rnd = random.Random(seed)
+    sig = [rnd.uniform(0.8, 1.2) for _ in PHRASE]
+    jitter = random.Random(seed * 977 + 1)
+    return {
+        "phrase": PHRASE,
+        "dwell_ms": [round(dwell * s * jitter.uniform(0.92, 1.08), 1) for s in sig],
+        "flight_ms": [None] + [round(flight * s * jitter.uniform(0.92, 1.08), 1) for s in sig[1:]],
+    }
+
+
+uname = f"phrase_{int(time.time() * 1000) % 10_000_000}"
+s, body = req("/auth/register", {
+    "username": uname, "password": "P!123456",
+    "keystroke": ks(), "mouse": ms(), "context": ctx("phrase-dev"),
+    "phrase_enrollments": [phrase_sample(seed=1) for _ in range(4)],
+})
+check("register accepts phrase enrollments", s == 200 and bool(body.get("access_token")), f"got {s}")
+ptoken = body.get("access_token")
+
+s, _ = req("/session/phrase/verify", {"timings": phrase_sample(seed=1)}, ptoken)
+check("phrase verify rejected when no challenge pending", s == 400, f"got {s}")
+
+# Drive the session into step-up (not termination) so a challenge is
+# pending. A good beat first establishes admin trust at ~100; the next bad
+# beat then blends down into the 55-75 step-up band rather than opening
+# below 55, which would terminate outright.
+beat(ptoken, "admin", fp="phrase-dev")
+pending = False
+for _ in range(6):
+    s, b = beat(ptoken, "admin", keystroke=ks(dwell=300, flight=600, count=25), fp="phrase-dev")
+    if s == 200 and b.get("mfa_pending"):
+        pending = True
+        break
+    if s != 200 or b.get("decision") == "terminate":
+        break
+check("anomaly raises a step-up challenge", pending,
+      f"decision was {b.get('decision')} at {b.get('trust_score')}")
+
+if pending:
+    s, b = req("/session/phrase/verify", {"timings": phrase_sample(dwell=160, flight=300, seed=42)}, ptoken)
+    check("impostor rhythm is rejected", s == 200 and b.get("verified") is False,
+          f"status {s} score {b.get('phrase_score')}")
+    check("rejection reports a score below threshold",
+          (b.get("phrase_score") or 100) < b.get("threshold", 0),
+          f"{b.get('phrase_score')} vs {b.get('threshold')}")
+
+    s, b = req("/session/phrase/verify", {"timings": phrase_sample(seed=1)}, ptoken)
+    check("genuine rhythm is accepted", s == 200 and b.get("verified") is True,
+          f"status {s} score {b.get('phrase_score')}")
+    check("accepting restores trust for that operation", (b.get("trust_score") or 0) >= 70,
+          f"{b.get('trust_score')}")
+
+    s, _ = req("/session/phrase/verify", {"timings": phrase_sample(seed=1)}, ptoken)
+    check("challenge is consumed after success", s == 400, f"got {s}")
+
+s, _ = req("/session/phrase/verify",
+           {"timings": {"phrase": PHRASE, "dwell_ms": [90.0, 95.0], "flight_ms": [None, 120.0]}},
+           ptoken)
+check("a partial phrase attempt is refused", s == 400, f"got {s}")
 
 # --- summary ---------------------------------------------------------------
 total = _passed + len(_failed)

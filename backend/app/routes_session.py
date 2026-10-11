@@ -12,9 +12,12 @@ from app.models import AuthSession, BehaviorSample, OperationTrust, RiskEvent, U
 from app.net_utils import client_ip
 from app.risk_engine import evaluate, suggest_threshold_calibration, trust_vector, update_trust_vector
 from app.routes_auth import _record_context
+from app.phrase_auth import enrolled_samples, score_attempt, valid_attempt
 from app.schemas import (
     MfaVerifyRequest,
     MfaVerifyResponse,
+    PhraseVerifyRequest,
+    PhraseVerifyResponse,
     SessionStatusResponse,
     TelemetryRequest,
 )
@@ -63,6 +66,7 @@ def submit_telemetry(
             context_score=result["context_score"],
             decision=result["decision"],
             mfa_pending=auth_session.mfa_pending,
+            mfa_pending_operation=auth_session.mfa_pending_operation,
             reasons=result["reasons"],
             trust_vector=result["trust_vector"],
             idle=True,
@@ -120,6 +124,7 @@ def submit_telemetry(
         context_score=result["context_score"],
         decision=result["decision"],
         mfa_pending=auth_session.mfa_pending,
+        mfa_pending_operation=auth_session.mfa_pending_operation,
         reasons=result["reasons"],
         feature_scores=result["feature_scores"],
         context_checks=result["context_checks"],
@@ -148,6 +153,7 @@ def get_status(
         context_score=latest_event.context_score if latest_event else 100.0,
         decision=decision,
         mfa_pending=auth_session.mfa_pending,
+        mfa_pending_operation=auth_session.mfa_pending_operation,
         reasons=latest_event.reasons if latest_event else [],
         trust_vector=trust_vector(db, auth_session),
     )
@@ -182,6 +188,62 @@ def verify_mfa(
     db.commit()
 
     return MfaVerifyResponse(verified=True, trust_score=new_score, operation=operation)
+
+
+@router.post("/phrase/verify", response_model=PhraseVerifyResponse)
+def verify_phrase(
+    payload: PhraseVerifyRequest,
+    db: DBSession = Depends(get_db),
+    auth_session: AuthSession = Depends(get_current_session),
+    user: User = Depends(get_current_user),
+):
+    """Step-up by re-typing the enrollment phrase, verified biometrically.
+
+    This is the real identity check: a static OTP only proves possession of
+    a code, whereas scoring the phrase's per-character rhythm against the
+    user's enrolled profile tests whether the person at the keyboard types
+    like the enrolled person. Passing re-earns trust for the challenged
+    operation only, exactly as the OTP path does."""
+    if not auth_session.mfa_pending or not auth_session.mfa_pending_operation:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "No step-up challenge pending")
+
+    attempt = payload.timings.model_dump()
+    phrase = payload.timings.phrase
+
+    if not valid_attempt(attempt, phrase):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Phrase attempt incomplete -- type the whole phrase without corrections",
+        )
+
+    enrolled = enrolled_samples(db, user.id, phrase)
+    score, detail = score_attempt(attempt, enrolled)
+    threshold = settings.phrase_verify_threshold
+    operation = auth_session.mfa_pending_operation
+
+    if score < threshold:
+        current = db.query(OperationTrust).filter_by(
+            session_id=auth_session.id, operation=operation
+        ).first()
+        return PhraseVerifyResponse(
+            verified=False, phrase_score=round(score, 1), threshold=threshold,
+            operation=operation,
+            trust_score=current.trust_score if current else None, detail=detail,
+        )
+
+    new_score = update_trust_vector(
+        db, auth_session, operation,
+        evidence=max(OPERATION_CONFIG[operation]["allow_threshold"], 80.0),
+    )
+    auth_session.mfa_pending = False
+    auth_session.mfa_pending_operation = None
+    auth_session.last_trust_score = new_score
+    db.commit()
+
+    return PhraseVerifyResponse(
+        verified=True, phrase_score=round(score, 1), threshold=threshold,
+        operation=operation, trust_score=new_score, detail=detail,
+    )
 
 
 @router.get("/calibration")
