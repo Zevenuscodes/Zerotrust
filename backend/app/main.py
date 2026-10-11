@@ -1,6 +1,7 @@
 import os
 
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -52,4 +53,8 @@ if os.path.isdir(_frontend_dist):
             and not request.url.path.startswith(_api_prefixes)
         ):
             return FileResponse(os.path.join(_frontend_dist, "index.html"))
-        raise exc
+        # Must RETURN a response, not re-raise: re-raising escapes the handler
+        # as an unhandled exception and every 400/401/403 in the app comes back
+        # to the client as a 500 instead. That also broke the frontend's
+        # `err.status === 403` check for a risk-engine-terminated session.
+        return await http_exception_handler(request, exc)

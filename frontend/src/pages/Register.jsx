@@ -70,10 +70,7 @@ export default function Register() {
       <div className="auth-page card">
         <Brand subtitle="Continuous authentication" />
         <h2>Register</h2>
-        <p className="muted">
-          This baseline sample (typing rhythm + mouse movement) trains your
-          personal behavior profile for continuous authentication.
-        </p>
+        <p className="muted">Typing this passphrase creates your behavior baseline.</p>
         <form onSubmit={handleSubmit}>
           <label>
             Username

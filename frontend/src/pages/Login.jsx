@@ -55,7 +55,6 @@ export default function Login() {
       <div className="auth-page card">
         <Brand subtitle="Continuous authentication" />
         <h2>Log in</h2>
-        <p className="muted">Your typing rhythm on the password field feeds the behavior model.</p>
         <form onSubmit={handleSubmit}>
           <label>
             Username

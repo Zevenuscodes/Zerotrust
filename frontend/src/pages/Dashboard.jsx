@@ -174,11 +174,7 @@ export default function Dashboard() {
             </svg>
           </div>
           <h1>Session terminated</h1>
-          <p>
-            The risk engine detected a trust score below the safe threshold and
-            ended this session. This is the Zero Trust policy in action: never
-            trust, always verify — even mid-session.
-          </p>
+          <p>Trust score fell below the safe threshold, so this session was ended.</p>
           <button onClick={() => { logout(); navigate("/login"); }}>
             Back to login
           </button>
@@ -241,7 +237,7 @@ export default function Dashboard() {
             </div>
             {bootstrapped && (
               <p className="muted" style={{ marginBottom: 6 }}>
-                Not enough "{operation}"-specific history yet — bootstrapping from your overall behavior.
+                Using overall baseline — not enough "{operation}" history yet.
               </p>
             )}
             {reasons.length > 0 && (
@@ -259,13 +255,8 @@ export default function Dashboard() {
         <ParameterBreakdown featureScores={featureScores} contextChecks={contextChecks} />
 
         <section className="scratch-panel card">
-          <h2>Keep typing/moving to feed your behavior profile</h2>
-          <p className="muted">
-            Telemetry is sent every {TELEMETRY_INTERVAL_MS / 1000}s, tagged with
-            whichever operation is selected above. Each operation learns its own
-            baseline — try typing normally on "View", then switch to "Admin" and
-            type very differently to see only that component react.
-          </p>
+          <h2>Type here to feed your behavior profile</h2>
+          <p className="muted">Sampled every {TELEMETRY_INTERVAL_MS / 1000}s.</p>
           <textarea
             ref={scratchRef}
             value={scratch}
@@ -278,13 +269,11 @@ export default function Dashboard() {
         {mfaOpen && (
           <div className="modal-backdrop">
             <div className="modal card">
-              <h2>Step-up verification required</h2>
+              <h2>Verify to continue</h2>
               <p className="muted">
-                Trust for "{OPERATION_LABELS[mfaOperation] || mfaOperation}" dropped into
-                the medium-risk range. Enter the one-time code to re-earn trust for
-                this operation. (Other operations are unaffected.)
+                Trust for "{OPERATION_LABELS[mfaOperation] || mfaOperation}" dropped into the
+                medium-risk range. Demo OTP: 123456
               </p>
-              <p className="muted">(Demo OTP: 123456)</p>
               <form onSubmit={handleMfaSubmit}>
                 <input
                   value={otp}

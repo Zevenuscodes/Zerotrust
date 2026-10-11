@@ -8,12 +8,6 @@ export default function TrustVectorPanel({ vector, activeOperation, onSelect }) 
   return (
     <section className="vector-panel card">
       <h2>Trust vector T(t)</h2>
-      <p className="muted">
-        One independently-decaying trust component per operation class, each with
-        its own behavioral baseline and thresholds -- not one global score.
-        Verifying step-up re-earns trust for that operation only; it does not
-        transfer to the others.
-      </p>
       <div className="vector-row">
         {vector.map((v) => {
           const color = decisionColor(v.decision);

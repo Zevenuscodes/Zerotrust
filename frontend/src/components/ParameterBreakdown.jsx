@@ -33,11 +33,6 @@ export default function ParameterBreakdown({ featureScores, contextChecks }) {
   return (
     <section className="breakdown-panel card">
       <h2>Individual parameter scores</h2>
-      <p className="muted">
-        Every parameter below is scored 0-100 against your own historical
-        baseline, then combined into behavior score (60%) and context score
-        (40%).
-      </p>
 
       {featureScores?.length > 0 && (
         <div className="param-group">

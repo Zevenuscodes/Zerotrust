@@ -10,7 +10,7 @@ from app.geolocation import lookup as geo_lookup
 from app.metrics import emit_decision
 from app.models import AuthSession, BehaviorSample, OperationTrust, RiskEvent, User
 from app.net_utils import client_ip
-from app.risk_engine import evaluate, trust_vector, update_trust_vector
+from app.risk_engine import evaluate, suggest_threshold_calibration, trust_vector, update_trust_vector
 from app.routes_auth import _record_context
 from app.schemas import (
     MfaVerifyRequest,
@@ -175,6 +175,17 @@ def verify_mfa(
     db.commit()
 
     return MfaVerifyResponse(verified=True, trust_score=new_score, operation=operation)
+
+
+@router.get("/calibration")
+def get_calibration(
+    db: DBSession = Depends(get_db),
+    auth_session: AuthSession = Depends(get_current_session),
+):
+    """Audit-log-driven threshold suggestions per operation. See
+    risk_engine.suggest_threshold_calibration for what this does and does
+    not claim to be."""
+    return suggest_threshold_calibration(db)
 
 
 @router.post("/logout")
