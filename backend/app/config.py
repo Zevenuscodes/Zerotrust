@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     # step-up MFA: static demo OTP so the flow is demoable without a real SMS/email provider
     demo_otp: str = "123456"
 
+    # A sample is only folded back into the behavioral baseline if its own
+    # behavior score clears this, independently of the final allow/stepup
+    # decision (which also reflects context and accumulated trust).
+    learn_min_behavior_score: float = 70.0
+
     # ModelStore backend: "local" (dev) or "s3" (prod/AWS)
     model_store: str = "local"
     model_store_local_dir: str = "./model_store_data"
@@ -83,9 +88,18 @@ DEMO_LOCATIONS = {
 # calibration method" gap this model is meant to close.
 OPERATION_CLASSES = ["view", "edit", "admin"]
 
+#
+# min_evidence_weight is the floor on how much a fresh reading counts, no
+# matter how little time has passed. Without it the decay term alone decides:
+# with dt near zero, e^(-lambda*dt) is ~1 and a new observation contributes
+# essentially NOTHING, so trust freezes; even at a 12s heartbeat, "view"
+# absorbed only ~7% of each reading and barely moved while behavior swung
+# from 0 to 93. The floor keeps every observation meaningful while the decay
+# rates still set how much history each operation carries between readings.
 OPERATION_CONFIG = {
     "view": {
         "decay_rate": 0.006,  # ~115s half-life -- slow to change
+        "min_evidence_weight": 0.25,
         "device_weight": 10.0,
         "location_weight": 15.0,
         "allow_threshold": 55.0,
@@ -93,6 +107,7 @@ OPERATION_CONFIG = {
     },
     "edit": {
         "decay_rate": 0.02,  # ~35s half-life
+        "min_evidence_weight": 0.4,
         "device_weight": 25.0,
         "location_weight": 35.0,
         "allow_threshold": 65.0,
@@ -100,6 +115,7 @@ OPERATION_CONFIG = {
     },
     "admin": {
         "decay_rate": 0.06,  # ~11.5s half-life -- must be re-earned almost every heartbeat
+        "min_evidence_weight": 0.6,
         "device_weight": 45.0,
         "location_weight": 60.0,
         "allow_threshold": 75.0,

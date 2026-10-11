@@ -12,6 +12,22 @@ const FEATURE_LABELS = {
 };
 
 function ParamRow({ label, score, detail }) {
+  // score is null when this sample observed no events for the feature's
+  // modality (e.g. mouse features while the user only typed). Show it as
+  // not measured rather than as a zero.
+  if (score === null || score === undefined) {
+    return (
+      <div className="param-row">
+        <div className="param-row-top">
+          <span className="param-name">{label}</span>
+          <span className="param-score param-unmeasured">not used</span>
+        </div>
+        <div className="param-bar-track" />
+        <div className="param-detail">No activity for this input in the last sample</div>
+      </div>
+    );
+  }
+
   const color = trustColor(score);
   return (
     <div className="param-row">

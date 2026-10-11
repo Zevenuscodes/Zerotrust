@@ -62,10 +62,14 @@ class FeatureScore(BaseModel):
     feature sits from the user's own historical baseline."""
 
     name: str
-    value: float
+    value: Optional[float] = None
     baseline_mean: Optional[float] = None
     z_score: float
-    score: float
+    score: Optional[float] = None
+    # False when this sample observed no events for the feature's modality
+    # (e.g. mouse features while the user only typed). Such features are
+    # excluded from scoring rather than compared as if a zero was measured.
+    observed: bool = True
 
 
 class ContextCheck(BaseModel):

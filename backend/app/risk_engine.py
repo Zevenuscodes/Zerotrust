@@ -69,12 +69,25 @@ FEATURE_ORDER = [
     "direction_changes",
 ]
 
+# Typing and mousing are independent modalities, and a user very often does
+# one without the other -- typing a sentence without touching the mouse is
+# completely normal. The collectors report zeros for whichever modality saw
+# no events, and those zeros must be treated as MISSING, not as observed
+# values: scoring "mouse velocity 0" against a baseline of 0.8 reads as a
+# severe anomaly for the ordinary act of not touching the mouse, and storing
+# it drags the baseline toward zero so later real movement looks anomalous.
+KEYSTROKE_FEATURES = {"mean_dwell_ms", "std_dwell_ms", "mean_flight_ms", "std_flight_ms"}
+MOUSE_FEATURES = {"mean_velocity", "std_velocity", "mean_acceleration", "direction_changes"}
+
 # km/h an implied-travel-speed above this is not humanly possible between two logins
 IMPOSSIBLE_TRAVEL_KMH = 900.0
 EARTH_RADIUS_KM = 6371.0
 
 
 def featurize(keystroke: KeystrokeSample, mouse: MouseSample) -> dict:
+    # key_count / point_count are carried alongside the features so that both
+    # scoring and stored history know which modalities this sample actually
+    # observed (see KEYSTROKE_FEATURES / MOUSE_FEATURES above).
     return {
         "mean_dwell_ms": keystroke.mean_dwell_ms,
         "std_dwell_ms": keystroke.std_dwell_ms,
@@ -84,7 +97,30 @@ def featurize(keystroke: KeystrokeSample, mouse: MouseSample) -> dict:
         "std_velocity": mouse.std_velocity,
         "mean_acceleration": mouse.mean_acceleration,
         "direction_changes": float(mouse.direction_changes),
+        "key_count": float(keystroke.key_count),
+        "point_count": float(mouse.point_count),
     }
+
+
+def present_features(features: dict) -> List[str]:
+    """Which of FEATURE_ORDER this sample actually observed."""
+    present = []
+    if features.get("key_count", 0) > 0:
+        present += [f for f in FEATURE_ORDER if f in KEYSTROKE_FEATURES]
+    if features.get("point_count", 0) > 0:
+        present += [f for f in FEATURE_ORDER if f in MOUSE_FEATURES]
+    return present
+
+
+def _sample_has(sample_features: dict, feature: str) -> bool:
+    """Did a stored history sample observe the modality this feature belongs to?
+    Samples written before modality tracking carry no counts; treat those as
+    present so existing baselines keep working."""
+    if feature in KEYSTROKE_FEATURES:
+        return sample_features.get("key_count", 1) > 0
+    if feature in MOUSE_FEATURES:
+        return sample_features.get("point_count", 1) > 0
+    return True
 
 
 def _vector(features: dict) -> np.ndarray:
@@ -116,32 +152,51 @@ def _safe_std(std: np.ndarray, mean: np.ndarray) -> np.ndarray:
     return np.maximum(std, np.maximum(RELATIVE_STD_FLOOR * np.abs(mean), ABSOLUTE_STD_FLOOR))
 
 
-def _per_feature_scores(features: dict, history: np.ndarray) -> List[dict]:
-    """Per-parameter breakdown: how far each individual feature sits from the
-    (operation-specific) historical baseline used for this evaluation."""
-    if history.shape[0] == 0:
-        return [
-            {"name": k, "value": round(features[k], 3), "baseline_mean": None, "z_score": 0.0, "score": 100.0}
-            for k in FEATURE_ORDER
-        ]
+def _feature_baseline(samples: List[BehaviorSample], feature: str) -> Tuple[Optional[float], float]:
+    """Mean/std of one feature over only the history samples that actually
+    observed its modality, so a run of keyboard-only samples can't drag the
+    mouse baseline toward zero (or vice versa)."""
+    vals = [
+        float(s.features.get(feature, 0.0))
+        for s in samples
+        if _sample_has(s.features, feature)
+    ]
+    if not vals:
+        return None, 0.0
+    arr = np.array(vals, dtype=float)
+    return float(arr.mean()), float(arr.std())
 
-    centroid = history.mean(axis=0)
-    std = history.std(axis=0)
-    std_safe = _safe_std(std, centroid)
-    vector = _vector(features)[0]
 
+def _per_feature_scores(features: dict, samples: List[BehaviorSample]) -> List[dict]:
+    """Per-parameter breakdown. Features whose modality this sample did not
+    observe are reported as not-observed and excluded from scoring entirely,
+    rather than being compared as if a zero had been measured."""
+    observed = set(present_features(features))
     results = []
-    for i, key in enumerate(FEATURE_ORDER):
-        z = abs(float((vector[i] - centroid[i]) / std_safe[i]))
-        score = max(0.0, min(100.0, 100.0 - z * 20.0))
+
+    for key in FEATURE_ORDER:
+        if key not in observed:
+            results.append(
+                {"name": key, "value": None, "baseline_mean": None,
+                 "z_score": 0.0, "score": None, "observed": False}
+            )
+            continue
+
+        value = float(features[key])
+        mean, std = _feature_baseline(samples, key)
+        if mean is None:
+            results.append(
+                {"name": key, "value": round(value, 3), "baseline_mean": None,
+                 "z_score": 0.0, "score": 100.0, "observed": True}
+            )
+            continue
+
+        safe = max(std, RELATIVE_STD_FLOOR * abs(mean), ABSOLUTE_STD_FLOOR)
+        z = abs((value - mean) / safe)
         results.append(
-            {
-                "name": key,
-                "value": round(float(vector[i]), 3),
-                "baseline_mean": round(float(centroid[i]), 3),
-                "z_score": round(z, 3),
-                "score": round(score, 1),
-            }
+            {"name": key, "value": round(value, 3), "baseline_mean": round(mean, 3),
+             "z_score": round(z, 3), "score": round(max(0.0, min(100.0, 100.0 - z * 20.0)), 1),
+             "observed": True}
         )
     return results
 
@@ -169,9 +224,7 @@ def operation_behavior_score(
         samples = _samples_for(db, user_id, None)
         bootstrapped = True
 
-    vector = _vector(features)
-    history = _history_matrix(samples)
-    feature_scores = _per_feature_scores(features, history)
+    feature_scores = _per_feature_scores(features, samples)
 
     if not samples:
         return 100.0, feature_scores, bootstrapped
@@ -183,21 +236,25 @@ def operation_behavior_score(
     # the per-parameter breakdown. The IsolationForest below can only pull
     # this score down, never push it up, so an anomaly this detector catches
     # can never be masked by the forest calling it normal.
-    centroid = history.mean(axis=0)
-    std = history.std(axis=0)
-    std_safe = _safe_std(std, centroid)
-    z = np.abs((vector[0] - centroid) / std_safe)
-    # RMS, not a plain mean: typing unusually fast only shifts the 4
-    # keystroke features, leaving the 4 mouse features near-baseline. A
-    # plain average lets those unaffected features dilute a real
-    # keystroke anomaly by ~half. RMS weights large deviations more
-    # heavily so a strong anomaly in a subset of features isn't washed
-    # out by the features that were never going to move.
-    agg_z = float(np.sqrt(np.mean(z ** 2)))
+    #
+    # Only features this sample actually observed take part: a keyboard-only
+    # sample is scored purely on its 4 keystroke features instead of being
+    # punished for four "zero" mouse readings it never measured.
+    #
+    # RMS, not a plain mean: typing unusually fast only shifts the keystroke
+    # features, and a plain average lets unaffected features dilute a real
+    # anomaly. RMS weights large deviations more heavily.
+    observed_z = [f["z_score"] for f in feature_scores if f["observed"] and f["score"] is not None]
+    if not observed_z:
+        return 100.0, feature_scores, bootstrapped
+    agg_z = float(np.sqrt(np.mean(np.array(observed_z, dtype=float) ** 2)))
     statistical_score = float(max(0.0, 100.0 - agg_z * 20.0))
 
     if len(samples) < MIN_SAMPLES_FOR_MODEL:
         return statistical_score, feature_scores, bootstrapped
+
+    vector = _vector(features)
+    history = _history_matrix(samples)
 
     # model key includes the operation so "view"/"edit"/"admin" baselines
     # for the same user never overwrite each other in the ModelStore.
@@ -400,8 +457,11 @@ def update_trust_vector(db: DBSession, session: AuthSession, operation: str, evi
         db.add(row)
     else:
         dt = max((now - row.updated_at).total_seconds(), 0.0)
-        decay = math.exp(-lam * dt)
-        new_value = row.trust_score * decay + (1.0 - decay) * evidence
+        # Weight on the new reading. The decay term alone leaves this at ~0
+        # when little time has passed, which froze trust entirely; the
+        # per-operation floor guarantees every observation actually counts.
+        alpha = max(1.0 - math.exp(-lam * dt), OPERATION_CONFIG[operation]["min_evidence_weight"])
+        new_value = row.trust_score * (1.0 - alpha) + alpha * evidence
         row.trust_score = new_value
         row.updated_at = now
 

@@ -72,7 +72,14 @@ def submit_telemetry(
     # so an attacker's own telemetry can't poison the legitimate user's
     # baseline -- and it's tagged with the operation so it only ever
     # reinforces that operation's own baseline, not the others.
-    if result["decision"] == "allow":
+    #
+    # Gated on the BEHAVIOR score, not just the final decision: the decision
+    # also reflects context and carried-over trust, so a sample whose typing
+    # was plainly anomalous could still land on "allow" and be learned as
+    # normal -- which is exactly how a run of bad samples was observed
+    # dragging a baseline toward itself until the anomaly disappeared.
+    behavior_trusted = result["behavior_score"] >= settings.learn_min_behavior_score
+    if result["decision"] == "allow" and behavior_trusted:
         db.add(
             BehaviorSample(
                 user_id=user.id, sample_type="session", operation=operation, features=result["features"]

@@ -443,6 +443,14 @@ button.ghost:hover:not(:disabled) { background: var(--surface-2); color: var(--t
   transition: width 0.4s ease, background 0.4s ease;
 }
 
+.param-unmeasured {
+  color: var(--text-dim);
+  font-weight: 500;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .param-detail {
   margin-top: 3px;
   font-size: 0.72rem;

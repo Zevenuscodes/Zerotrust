@@ -166,6 +166,58 @@ check("very slow typing scored as anomalous", b_slow < 60, f"got {b_slow:.1f}")
 b_mild = beat(token, "view", keystroke=ks(dwell=100, flight=102))[1]["behavior_score"]
 check("mild natural drift still trusted", b_mild >= 55, f"got {b_mild:.1f}")
 
+# --- partial modalities ----------------------------------------------------
+print("\npartial input (typing without mouse, and vice versa)")
+_, token, _ = new_user("modal")
+b = beat(token, "view", mouse=ms(0, 0))[1]
+feats = {f["name"]: f for f in b["feature_scores"]}
+check("typing with no mouse is not penalised", b["behavior_score"] >= 90, f"got {b['behavior_score']:.1f}")
+check("mouse features marked not-observed", feats["mean_velocity"]["observed"] is False)
+check("keystroke features still scored", feats["mean_dwell_ms"]["observed"] is True)
+
+_, token, _ = new_user("modal2")
+b = beat(token, "view", keystroke=ks(0, 0, 0))[1]
+feats = {f["name"]: f for f in b["feature_scores"]}
+check("mousing with no typing is not penalised", b["behavior_score"] >= 90, f"got {b['behavior_score']:.1f}")
+check("keystroke features marked not-observed", feats["mean_dwell_ms"]["observed"] is False)
+
+# --- trust actually responds -----------------------------------------------
+print("\ntrust responsiveness")
+_, token, _ = new_user("resp")
+start = beat(token, "view")[1]["trust_score"]
+beats_to_stepup = None
+for i in range(1, 11):
+    bad = beat(token, "view", keystroke=ks(dwell=300, flight=600, count=5))[1]
+    if bad["decision"] != "allow" and beats_to_stepup is None:
+        beats_to_stepup = i
+check("sustained anomaly moves trust down", bad["trust_score"] < start - 10,
+      f"{start:.1f} -> {bad['trust_score']:.1f}")
+check("anomaly leaves 'allow' on view within 10 beats", beats_to_stepup is not None,
+      f"still {bad['decision']} at {bad['trust_score']:.1f}")
+
+# admin is the strict end of the gradient: it must react far faster than view
+_, token_a, _ = new_user("resp_admin")
+beat(token_a, "admin")
+admin_bad = beat(token_a, "admin", keystroke=ks(dwell=300, flight=600, count=5))[1]
+check("admin reacts to the same anomaly within 1 beat", admin_bad["decision"] != "allow",
+      f"{admin_bad['decision']} at {admin_bad['trust_score']:.1f}")
+check("view is more forgiving than admin", (beats_to_stepup or 99) > 1,
+      f"view took {beats_to_stepup} beats")
+low = bad["trust_score"]
+for _ in range(4):
+    good = beat(token, "view")[1]
+check("trust recovers once behavior normalises", good["trust_score"] > low + 5,
+      f"{low:.1f} -> {good['trust_score']:.1f}")
+
+# --- anti-poisoning --------------------------------------------------------
+print("\nanti-poisoning")
+_, token, _ = new_user("poison")
+scores = []
+for _ in range(6):
+    scores.append(beat(token, "view", keystroke=ks(dwell=300, flight=600, count=5))[1]["behavior_score"])
+check("repeated anomalies are not learned as normal", scores[-1] <= scores[0] + 10,
+      f"first={scores[0]:.1f} last={scores[-1]:.1f}")
+
 # --- context: unknown device ----------------------------------------------
 print("\ncontext checks")
 _, token, _ = new_user("ctx", fp="known-device")
