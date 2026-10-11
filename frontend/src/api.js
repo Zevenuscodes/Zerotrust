@@ -1,4 +1,8 @@
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000";
+// Default to same-origin: the container serves this SPA and the API from one
+// origin, so relative URLs are correct wherever it runs -- localhost on any
+// port, or the load balancer's hostname on AWS. Hardcoding localhost:8000
+// broke both. `npm run dev` sets VITE_API_BASE to reach the backend instead.
+const API_BASE = import.meta.env.VITE_API_BASE || "";
 
 function authHeaders() {
   const token = localStorage.getItem("zt_token");

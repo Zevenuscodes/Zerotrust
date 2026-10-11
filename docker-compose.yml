@@ -31,7 +31,10 @@ services:
       # impossible-travel check. Never set this in a real deployment.
       DEMO_LOCATION_ENABLED: "true"
     ports:
-      - "8000:8000"
+      # 8001 on the host: port 8000 is commonly taken by another local
+      # project, and a clash is invisible -- the browser prefers IPv4 and
+      # silently lands on whichever app grabbed 127.0.0.1 first.
+      - "8001:8000"
     volumes:
       - zt_model_store:/app/model_store_data
 
