@@ -326,7 +326,11 @@ export default function Dashboard() {
                   <input
                     ref={challengeRef}
                     value={challengeTyped}
-                    onChange={(e) => setChallengeTyped(e.target.value)}
+                    onChange={(e) => {
+                      setChallengeTyped(e.target.value);
+                      const state = challengeTracker.current.sync(e.target.value);
+                      setMfaError(state === "diverged" ? "That doesn't match — backspace to fix it." : "");
+                    }}
                     placeholder="Type the phrase above"
                     autoFocus
                   />

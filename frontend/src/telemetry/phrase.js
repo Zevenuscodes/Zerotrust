@@ -1,37 +1,35 @@
 // Per-digraph keystroke capture for a FIXED phrase.
 //
-// The free-text collector (keystroke.js) averages dwell/flight across
-// whatever the user happened to type, so its numbers track the *text* at
-// least as much as the *typist*: "hello" and a long paragraph produce very
-// different averages for the same person. That content variance swamps the
-// identity signal.
+// The free-text collectors averaged dwell/flight over whatever the user
+// happened to type, so their numbers tracked the *text* at least as much as
+// the *typist*. Typing a known phrase removes that: everyone types the same
+// characters in the same order, so timings can be compared like-for-like --
+// your flight time on "th" against your own past flight times on "th".
 //
-// Typing a known phrase removes it. Everyone types the same characters in
-// the same order, so timings can be compared like-for-like: your flight
-// time on "th" against your own past flight times on "th". That per-digraph
-// comparison is where keystroke dynamics actually carries identity.
+// Capture is reconciled against the input's actual value on every change,
+// not driven by the key stream alone. An earlier version latched a single
+// "aborted" flag on the first wrong keypress and never cleared it, so one
+// typo silently killed capture for the rest of the page -- the progress
+// never advanced and nothing explained why.
 
-// onComplete fires from the final keyup, NOT from a value change. React's
-// onChange runs on `input`, which happens during keydown -- at that moment
-// the last character's dwell time has not been measured yet and the sample
-// would be one character short.
 export function createPhraseTracker(phrase, onComplete) {
-  let downAt = null;        // timestamp of the key currently held
-  let lastUpAt = null;      // timestamp of the previous key release
-  let index = 0;            // position within the phrase
-  const dwell = [];         // dwell[i]  = hold time of phrase character i
-  const flight = [];        // flight[i] = gap between char i-1 release and char i press
-  let aborted = false;      // typed something that doesn't match the phrase
+  let downAt = null;    // timestamp of the key currently held
+  let lastUpAt = null;  // timestamp of the previous key release
+  let index = 0;        // how many characters have been captured
+  const dwell = [];     // dwell[i]  = hold time of phrase character i
+  const flight = [];    // flight[i] = gap from char i-1's release to char i's press
+  let diverged = false; // the field no longer matches the phrase at all
 
   function isContentKey(e) {
     return e.key.length === 1; // ignore Shift/Backspace/arrows etc.
   }
 
   function onKeyDown(e) {
-    if (!isContentKey(e)) return;
+    if (!isContentKey(e) || diverged) return;
     const now = performance.now();
     if (e.key !== phrase[index]) {
-      aborted = true; // a typo invalidates positional alignment
+      // Wrong character: don't record it. sync() will see the value diverge
+      // and the user can backspace to recover.
       return;
     }
     downAt = now;
@@ -39,13 +37,16 @@ export function createPhraseTracker(phrase, onComplete) {
   }
 
   function onKeyUp(e) {
-    if (!isContentKey(e) || aborted || downAt === null) return;
+    if (!isContentKey(e) || diverged || downAt === null) return;
     const now = performance.now();
     dwell[index] = now - downAt;
     lastUpAt = now;
     downAt = null;
     index += 1;
 
+    // Completion is signalled from the final keyup, NOT from a value change:
+    // React's onChange runs on `input`, during keydown, at which point the
+    // last character's dwell time has not been measured yet.
     if (index === phrase.length && typeof onComplete === "function") {
       const captured = sample();
       reset();
@@ -68,24 +69,43 @@ export function createPhraseTracker(phrase, onComplete) {
     index = 0;
     dwell.length = 0;
     flight.length = 0;
-    aborted = false;
+    diverged = false;
   }
 
-  // Complete only when every character was typed in order with no typos --
-  // a partial or corrected attempt can't be aligned position-by-position.
-  function isComplete() {
-    return !aborted && index === phrase.length;
+  // Reconcile with what is actually in the field. The input's value is the
+  // authority -- it accounts for backspaces, selections, paste and autofill,
+  // none of which the key stream alone describes correctly.
+  // Returns "ok" | "diverged" | "empty".
+  function sync(value) {
+    if (value === "") {
+      reset();
+      return "empty";
+    }
+    if (!phrase.startsWith(value)) {
+      diverged = true;
+      return "diverged";
+    }
+    diverged = false;
+    if (value.length < index) {
+      // characters were deleted -- drop their timings and carry on
+      index = value.length;
+      dwell.length = index;
+      flight.length = index;
+      lastUpAt = null; // the next flight time would span the correction
+      downAt = null;
+    }
+    return "ok";
   }
 
   function sample() {
-    if (!isComplete()) return null;
+    if (diverged || index !== phrase.length) return null;
     return {
       phrase,
       // index i of each array corresponds to phrase[i]
-      dwell_ms: dwell.map((v) => Math.round(v * 10) / 10),
+      dwell_ms: dwell.map((v) => (v === null ? null : Math.round(v * 10) / 10)),
       flight_ms: flight.map((v) => (v === null ? null : Math.round(v * 10) / 10)),
     };
   }
 
-  return { attach, reset, isComplete, sample };
+  return { attach, reset, sync, sample, captured: () => index };
 }

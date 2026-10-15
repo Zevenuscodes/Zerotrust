@@ -23,12 +23,8 @@ export default function Register() {
   const phraseTracker = useRef(
     createPhraseTracker(BASELINE_PASSPHRASE, (sample) => {
       setTyped("");
-      if (sample) {
-        setEnrollments((prev) => [...prev, sample]);
-        setError("");
-      } else {
-        setError("That pass had a correction in it — type it straight through.");
-      }
+      setError("");
+      if (sample) setEnrollments((prev) => [...prev, sample]);
     })
   );
   const navigate = useNavigate();
@@ -45,7 +41,12 @@ export default function Register() {
   }, []);
 
   function handlePhraseChange(e) {
-    setTyped(e.target.value);
+    const value = e.target.value;
+    setTyped(value);
+    // The field's value is the authority, so backspace corrections resync
+    // instead of silently killing capture.
+    const state = phraseTracker.current.sync(value);
+    setError(state === "diverged" ? "That doesn't match — backspace to fix it." : "");
   }
 
   async function handleSubmit(e) {
