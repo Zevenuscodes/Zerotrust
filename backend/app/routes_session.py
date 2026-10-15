@@ -8,9 +8,11 @@ from app.database import get_db
 from app.deps import get_current_session, get_current_user
 from app.geolocation import lookup as geo_lookup
 from app.metrics import emit_decision
-from app.models import AuthSession, BehaviorSample, OperationTrust, RiskEvent, User
+from app.models import AuthSession, OperationTrust, RiskEvent, User
 from app.net_utils import client_ip
 from app.risk_engine import evaluate, suggest_threshold_calibration, trust_vector, update_trust_vector
+from app.signals import access_patterns
+from app.signals.impossible import record_network
 from app.routes_auth import _record_context
 from app.phrase_auth import enrolled_samples, score_attempt, valid_attempt
 from app.schemas import (
@@ -41,29 +43,26 @@ def submit_telemetry(
         ip = DEMO_LOCATIONS[payload.simulated_location]
     geo = geo_lookup(ip)
     operation = payload.operation if payload.operation in OPERATION_CONFIG else "view"
+    environment = payload.environment.model_dump()
 
     result = evaluate(
         db=db,
         session=auth_session,
         operation=operation,
-        keystroke=payload.keystroke,
-        mouse=payload.mouse,
-        context=payload.context,
+        environment=environment,
+        automation_signals=payload.automation.model_dump(),
         ip_address=ip,
         geo=geo,
     )
 
     if result["idle"]:
-        # No keyboard/mouse activity since the last heartbeat -- nothing was
-        # scored, so nothing about the session changes. Report current state
-        # as-is rather than writing an audit row for a heartbeat that did
-        # nothing.
+        # No interaction at all in this interval, so there is no evidence to
+        # score. Report the session unchanged rather than writing an audit
+        # row for a beat that observed nothing.
         return SessionStatusResponse(
             session_id=auth_session.id,
             operation=operation,
             trust_score=result["trust_score"],
-            behavior_score=result["behavior_score"],
-            context_score=result["context_score"],
             decision=result["decision"],
             mfa_pending=auth_session.mfa_pending,
             mfa_pending_operation=auth_session.mfa_pending_operation,
@@ -72,24 +71,13 @@ def submit_telemetry(
             idle=True,
         )
 
-    # Only reinforce the behavior model with samples the risk engine trusted,
-    # so an attacker's own telemetry can't poison the legitimate user's
-    # baseline -- and it's tagged with the operation so it only ever
-    # reinforces that operation's own baseline, not the others.
-    #
-    # Gated on the BEHAVIOR score, not just the final decision: the decision
-    # also reflects context and carried-over trust, so a sample whose typing
-    # was plainly anomalous could still land on "allow" and be learned as
-    # normal -- which is exactly how a run of bad samples was observed
-    # dragging a baseline toward itself until the anomaly disappeared.
-    behavior_trusted = result["behavior_score"] >= settings.learn_min_behavior_score
-    if result["decision"] == "allow" and behavior_trusted:
-        db.add(
-            BehaviorSample(
-                user_id=user.id, sample_type="session", operation=operation, features=result["features"]
-            )
-        )
-        _record_context(db, user.id, payload.context.device_fingerprint, ip, geo)
+    record_network(db, auth_session.id, ip, datetime.utcnow())
+
+    # Only interactions the engine trusted teach the access profile, so a
+    # hijacker's 3am admin burst cannot establish 3am admin bursts as normal.
+    if result["decision"] == "allow":
+        access_patterns.record(db, user.id, operation, datetime.utcnow(), result["actions"])
+        _record_context(db, user.id, payload.environment.device_fingerprint, ip, geo)
 
     auth_session.last_trust_score = result["trust_score"]
     if result["decision"] == "terminate":
@@ -106,8 +94,7 @@ def submit_telemetry(
             user_id=user.id,
             session_id=auth_session.id,
             operation=operation,
-            behavior_score=result["behavior_score"],
-            context_score=result["context_score"],
+            family_scores=result["family_scores"],
             trust_score=result["trust_score"],
             decision=result["decision"],
             reasons=result["reasons"],
@@ -116,20 +103,21 @@ def submit_telemetry(
     db.commit()
     emit_decision(result["decision"])
 
+    weights = result["family_weights"]
     return SessionStatusResponse(
         session_id=auth_session.id,
         operation=operation,
         trust_score=result["trust_score"],
-        behavior_score=result["behavior_score"],
-        context_score=result["context_score"],
         decision=result["decision"],
         mfa_pending=auth_session.mfa_pending,
         mfa_pending_operation=auth_session.mfa_pending_operation,
         reasons=result["reasons"],
-        feature_scores=result["feature_scores"],
+        family_scores=[
+            {"name": name, "score": score, "weight": weights[name]}
+            for name, score in result["family_scores"].items()
+        ],
         context_checks=result["context_checks"],
         trust_vector=result["trust_vector"],
-        bootstrapped=result["bootstrapped"],
     )
 
 
@@ -149,8 +137,6 @@ def get_status(
         session_id=auth_session.id,
         operation=latest_event.operation if latest_event else "view",
         trust_score=auth_session.last_trust_score,
-        behavior_score=latest_event.behavior_score if latest_event else 100.0,
-        context_score=latest_event.context_score if latest_event else 100.0,
         decision=decision,
         mfa_pending=auth_session.mfa_pending,
         mfa_pending_operation=auth_session.mfa_pending_operation,

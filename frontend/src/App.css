@@ -593,3 +593,11 @@ button.ghost:hover:not(:disabled) { background: var(--surface-2); color: var(--t
   line-height: 1.6;
   margin-bottom: 1.5rem;
 }
+
+.param-weight {
+  margin-left: 6px;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}

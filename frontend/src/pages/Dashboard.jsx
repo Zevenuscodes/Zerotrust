@@ -2,9 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../context/AuthContext";
-import { createKeystrokeTracker } from "../telemetry/keystroke";
-import { createMouseTracker } from "../telemetry/mouse";
-import { getContextInfo } from "../telemetry/fingerprint";
+import { createAutomationTracker } from "../telemetry/automation";
+import { getEnvironment } from "../telemetry/environment";
 import TrustGauge from "../components/TrustGauge";
 import Sparkline from "../components/Sparkline";
 import Brand from "../components/Brand";
@@ -38,9 +37,8 @@ export default function Dashboard() {
   const [decision, setDecision] = useState("allow");
   const [reasons, setReasons] = useState([]);
   const [history, setHistory] = useState({ view: [100], edit: [100], admin: [100] });
-  const [featureScores, setFeatureScores] = useState([]);
+  const [familyScores, setFamilyScores] = useState([]);
   const [contextChecks, setContextChecks] = useState([]);
-  const [bootstrapped, setBootstrapped] = useState(false);
   const [mfaOpen, setMfaOpen] = useState(false);
   const [mfaOperation, setMfaOperation] = useState(null);
   const [otp, setOtp] = useState("");
@@ -51,8 +49,7 @@ export default function Dashboard() {
   const [terminated, setTerminated] = useState(false);
   const [scratch, setScratch] = useState("");
 
-  const keystrokeTracker = useRef(createKeystrokeTracker());
-  const mouseTracker = useRef(createMouseTracker());
+  const automationTracker = useRef(createAutomationTracker());
   const scratchRef = useRef(null);
   const challengeRef = useRef(null);
   const submitPhraseRef = useRef(null);
@@ -73,25 +70,17 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    const detachMouse = mouseTracker.current.attach(document);
-    let detachKeys = () => {};
-    if (scratchRef.current) {
-      detachKeys = keystrokeTracker.current.attach(scratchRef.current);
-    }
+    const detachAutomation = automationTracker.current.attach(document);
 
     const interval = setInterval(sendTelemetry, TELEMETRY_INTERVAL_MS);
 
     async function sendTelemetry() {
       try {
-        const keystroke = keystrokeTracker.current.snapshot();
-        const mouse = mouseTracker.current.snapshot();
-        const context = getContextInfo();
         const activeOperation = operationRef.current;
 
         const resp = await api.telemetry({
-          keystroke,
-          mouse,
-          context,
+          environment: getEnvironment(),
+          automation: automationTracker.current.snapshot(),
           operation: activeOperation,
           simulated_location: locationRef.current || null,
         });
@@ -104,9 +93,8 @@ export default function Dashboard() {
         // reading the screen.
         if (!resp.idle) {
           setReasons(resp.reasons || []);
-          setFeatureScores(resp.feature_scores || []);
+          setFamilyScores(resp.family_scores || []);
           setContextChecks(resp.context_checks || []);
-          setBootstrapped(resp.bootstrapped);
           setHistory((h) => ({
             ...h,
             [resp.operation]: [...(h[resp.operation] || []), resp.trust_score].slice(-HISTORY_LENGTH),
@@ -133,8 +121,7 @@ export default function Dashboard() {
     }
 
     return () => {
-      detachMouse();
-      detachKeys();
+      detachAutomation();
       clearInterval(interval);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -221,7 +208,7 @@ export default function Dashboard() {
 
   function handleSelectOperation(op) {
     setOperation(op);
-    setFeatureScores([]);
+    setFamilyScores([]);
     setContextChecks([]);
     setReasons([]);
   }
@@ -297,11 +284,6 @@ export default function Dashboard() {
               <Sparkline values={history[operation] || [100]} />
               <span className="muted">last {(history[operation] || []).length} heartbeats for this operation</span>
             </div>
-            {bootstrapped && (
-              <p className="muted" style={{ marginBottom: 6 }}>
-                Using overall baseline — not enough "{operation}" history yet.
-              </p>
-            )}
             {reasons.length > 0 && (
               <ul className="reasons">
                 {reasons.map((r, i) => (
@@ -314,7 +296,7 @@ export default function Dashboard() {
 
         <TrustVectorPanel vector={trustVector} activeOperation={operation} onSelect={handleSelectOperation} />
 
-        <ParameterBreakdown featureScores={featureScores} contextChecks={contextChecks} />
+        <ParameterBreakdown familyScores={familyScores} contextChecks={contextChecks} />
 
         <section className="scratch-panel card">
           <h2>Type here to feed your behavior profile</h2>

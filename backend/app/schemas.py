@@ -2,27 +2,40 @@ from typing import Optional, List
 from pydantic import BaseModel
 
 
-class KeystrokeSample(BaseModel):
-    key_count: int
-    mean_dwell_ms: float
-    std_dwell_ms: float
-    mean_flight_ms: float
-    std_flight_ms: float
+class Environment(BaseModel):
+    """Machine and browser properties a session is bound to. These are
+    sealed at login and re-checked on every beat -- none of them can change
+    legitimately while one person uses one browser on one machine."""
 
-
-class MouseSample(BaseModel):
-    point_count: int
-    mean_velocity: float
-    std_velocity: float
-    mean_acceleration: float
-    direction_changes: int
-
-
-class ContextSample(BaseModel):
     device_fingerprint: str
+    canvas_hash: Optional[str] = None
+    webgl_hash: Optional[str] = None
+    user_agent: Optional[str] = None
+    platform: Optional[str] = None
     screen_width: Optional[int] = None
     screen_height: Optional[int] = None
+    color_depth: Optional[int] = None
+    hardware_concurrency: Optional[int] = None
+    device_memory: Optional[float] = None
     timezone: Optional[str] = None
+    timezone_offset_min: Optional[int] = None
+    languages: Optional[str] = None
+    client_time_ms: Optional[float] = None
+
+
+class AutomationSignals(BaseModel):
+    """Evidence about whether a human is driving the session. Carries only
+    aggregate shape -- counts and a regularity ratio -- never keystroke
+    content or reconstructable timings."""
+
+    action_count: int = 0
+    interval_cv: Optional[float] = None
+    mean_interval_ms: Optional[int] = None
+    time_to_first_action_ms: Optional[int] = None
+    clicks_without_precursor: int = 0
+    pastes_into_sensitive: int = 0
+    saw_pointer_movement: bool = True
+    headless_hints: List[str] = []
 
 
 class PhraseTimings(BaseModel):
@@ -38,9 +51,7 @@ class PhraseTimings(BaseModel):
 class RegisterRequest(BaseModel):
     username: str
     password: str
-    keystroke: KeystrokeSample
-    mouse: MouseSample
-    context: ContextSample
+    environment: Environment
     # Repeated attempts at the fixed phrase, used to build the biometric
     # profile that the step-up challenge later verifies against.
     phrase_enrollments: List[PhraseTimings] = []
@@ -62,9 +73,7 @@ class PhraseVerifyResponse(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
-    keystroke: KeystrokeSample
-    mouse: MouseSample
-    context: ContextSample
+    environment: Environment
 
 
 class TokenResponse(BaseModel):
@@ -75,27 +84,19 @@ class TokenResponse(BaseModel):
 
 
 class TelemetryRequest(BaseModel):
-    keystroke: KeystrokeSample
-    mouse: MouseSample
-    context: ContextSample
+    environment: Environment
+    automation: AutomationSignals
     operation: str = "view"  # one of config.OPERATION_CLASSES
     # demo-only, ignored unless settings.demo_location_enabled (see config)
     simulated_location: Optional[str] = None
 
 
-class FeatureScore(BaseModel):
-    """Per-parameter breakdown of the behavior score: how far this one
-    feature sits from the user's own historical baseline."""
+class FamilyScore(BaseModel):
+    """One signal family's contribution to this evaluation."""
 
     name: str
-    value: Optional[float] = None
-    baseline_mean: Optional[float] = None
-    z_score: float
-    score: Optional[float] = None
-    # False when this sample observed no events for the feature's modality
-    # (e.g. mouse features while the user only typed). Such features are
-    # excluded from scoring rather than compared as if a zero was measured.
-    observed: bool = True
+    score: float
+    weight: float
 
 
 class ContextCheck(BaseModel):
@@ -121,8 +122,6 @@ class SessionStatusResponse(BaseModel):
     session_id: str
     operation: str = "view"
     trust_score: float
-    behavior_score: float
-    context_score: float
     decision: str  # allow | stepup | terminate
     mfa_pending: bool
     # Which operation raised the pending challenge. A challenge raised on
@@ -130,11 +129,10 @@ class SessionStatusResponse(BaseModel):
     # UI needs to know what to name -- and that a challenge exists at all.
     mfa_pending_operation: Optional[str] = None
     reasons: List[str] = []
-    feature_scores: List[FeatureScore] = []
+    family_scores: List[FamilyScore] = []
     context_checks: List[ContextCheck] = []
     trust_vector: List[OperationTrustEntry] = []
-    bootstrapped: bool = False  # true if this operation didn't have enough of its own history yet
-    idle: bool = False  # true if this heartbeat had no keyboard/mouse activity and wasn't scored
+    idle: bool = False  # true if the interval had no interaction at all and was not scored
 
 
 class MfaVerifyRequest(BaseModel):

@@ -1,20 +1,20 @@
 import { trustColor } from "./TrustGauge";
 
-const FEATURE_LABELS = {
-  mean_dwell_ms: "Mean key dwell time",
-  std_dwell_ms: "Dwell time variability",
-  mean_flight_ms: "Mean flight time (between keys)",
-  std_flight_ms: "Flight time variability",
-  mean_velocity: "Mean mouse velocity",
-  std_velocity: "Mouse velocity variability",
-  mean_acceleration: "Mean mouse acceleration",
-  direction_changes: "Mouse direction changes",
+const FAMILY_LABELS = {
+  integrity: "Session integrity",
+  impossible: "Impossible conditions",
+  automation: "Human vs automated",
+  patterns: "Access habits",
 };
 
-function ParamRow({ label, score, detail }) {
-  // score is null when this sample observed no events for the feature's
-  // modality (e.g. mouse features while the user only typed). Show it as
-  // not measured rather than as a zero.
+const FAMILY_BLURB = {
+  integrity: "Is the session still bound to the machine it was issued to",
+  impossible: "Travel, concurrent networks, clock agreement",
+  automation: "Browser authenticity and interaction rhythm",
+  patterns: "Time of day, operation mix, activity rate",
+};
+
+function Row({ label, score, detail, weight }) {
   if (score === null || score === undefined) {
     return (
       <div className="param-row">
@@ -23,7 +23,6 @@ function ParamRow({ label, score, detail }) {
           <span className="param-score param-unmeasured">not used</span>
         </div>
         <div className="param-bar-track" />
-        <div className="param-detail">No activity for this input in the last sample</div>
       </div>
     );
   }
@@ -32,37 +31,40 @@ function ParamRow({ label, score, detail }) {
   return (
     <div className="param-row">
       <div className="param-row-top">
-        <span className="param-name">{label}</span>
+        <span className="param-name">
+          {label}
+          {weight !== undefined && <span className="param-weight">×{weight.toFixed(2)}</span>}
+        </span>
         <span className="param-score" style={{ color }}>{score.toFixed(0)}</span>
       </div>
       <div className="param-bar-track">
-        <div className="param-bar-fill" style={{ width: `${Math.max(0, Math.min(100, score))}%`, background: color }} />
+        <div
+          className="param-bar-fill"
+          style={{ width: `${Math.max(0, Math.min(100, score))}%`, background: color }}
+        />
       </div>
       {detail && <div className="param-detail">{detail}</div>}
     </div>
   );
 }
 
-export default function ParameterBreakdown({ featureScores, contextChecks }) {
-  if (!featureScores?.length && !contextChecks?.length) return null;
+export default function ParameterBreakdown({ familyScores, contextChecks }) {
+  if (!familyScores?.length && !contextChecks?.length) return null;
 
   return (
     <section className="breakdown-panel card">
-      <h2>Individual parameter scores</h2>
+      <h2>Signal families</h2>
 
-      {featureScores?.length > 0 && (
+      {familyScores?.length > 0 && (
         <div className="param-group">
-          <h3>Behavior (typing + mouse)</h3>
-          {featureScores.map((f) => (
-            <ParamRow
+          <h3>Weighted for this operation</h3>
+          {familyScores.map((f) => (
+            <Row
               key={f.name}
-              label={FEATURE_LABELS[f.name] || f.name}
+              label={FAMILY_LABELS[f.name] || f.name}
               score={f.score}
-              detail={
-                f.baseline_mean !== null && f.baseline_mean !== undefined
-                  ? `value ${f.value} vs baseline ${f.baseline_mean} (z=${f.z_score})`
-                  : "no baseline yet"
-              }
+              weight={f.weight}
+              detail={FAMILY_BLURB[f.name]}
             />
           ))}
         </div>
@@ -70,9 +72,9 @@ export default function ParameterBreakdown({ featureScores, contextChecks }) {
 
       {contextChecks?.length > 0 && (
         <div className="param-group">
-          <h3>Context</h3>
+          <h3>Individual checks</h3>
           {contextChecks.map((c) => (
-            <ParamRow key={c.name} label={c.name} score={c.score} detail={c.detail} />
+            <Row key={c.name} label={c.name} score={c.score} detail={c.detail} />
           ))}
         </div>
       )}

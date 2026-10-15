@@ -61,6 +61,9 @@ class AuthSession(Base):
     status = Column(String, default="active")  # active | terminated | logged_out
     last_trust_score = Column(Float, default=100.0)  # mirrors the current operation's trust component
     last_operation = Column(String, nullable=True)  # for the navigation-sequence anomaly check
+    # Machine/browser properties this session is bound to, captured at login.
+    # Any later divergence means the token moved to a different machine.
+    sealed_context = Column(JSON, default=dict)
     mfa_pending = Column(Boolean, default=False)
     mfa_pending_operation = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -81,8 +84,9 @@ class RiskEvent(Base):
     user_id = Column(String, ForeignKey("users.id"), nullable=False)
     session_id = Column(String, ForeignKey("auth_sessions.id"), nullable=False)
     operation = Column(String, nullable=False, default="view")
-    behavior_score = Column(Float, nullable=False)
-    context_score = Column(Float, nullable=False)
+    # Per-family scores for this evaluation, e.g.
+    # {"integrity": 100.0, "impossible": 100.0, "automation": 92.0, "patterns": 80.0}
+    family_scores = Column(JSON, default=dict)
     trust_score = Column(Float, nullable=False)
     decision = Column(String, nullable=False)  # allow | stepup | terminate
     reasons = Column(JSON, default=list)  # list of human-readable reason strings
@@ -110,6 +114,34 @@ class KnownContext(Base):
     last_seen = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="known_contexts")
+
+
+class SessionNetwork(Base):
+    """Every network a session has been seen from. Two different addresses
+    inside a short window means the token is in two places at once."""
+
+    __tablename__ = "session_networks"
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    session_id = Column(String, ForeignKey("auth_sessions.id"), nullable=False)
+    ip_address = Column(String, nullable=False)
+    seen_at = Column(DateTime, default=datetime.utcnow)
+
+
+class UserAccessProfile(Base):
+    """Learned access habits: which hours this account is active, which
+    operations it performs, and its usual peak activity rate. Frequency
+    counts rather than timing distributions, so they are useful from the
+    first few sessions and stable week to week."""
+
+    __tablename__ = "user_access_profiles"
+
+    id = Column(String, primary_key=True, default=gen_uuid)
+    user_id = Column(String, ForeignKey("users.id"), unique=True, nullable=False)
+    hour_counts = Column(JSON, default=dict)       # {"14": 37, ...}
+    operation_counts = Column(JSON, default=dict)  # {"view": 120, ...}
+    total_events = Column(Integer, default=0)
+    max_actions_per_minute = Column(Float, default=0.0)
 
 
 class PhraseSample(Base):

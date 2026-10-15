@@ -1,5 +1,5 @@
 // Injected only into tabs whose site the user explicitly enabled (see background.js).
-// Captures the same keystroke/mouse features the web app does, asks the
+// Captures the same environment/automation signals the web app does, asks the
 // background service worker to score them against the backend risk engine
 // every 12s, and renders a small on-page indicator that reacts to the result.
 (function () {
@@ -7,10 +7,8 @@
   window.__ztContentLoaded = true;
 
   const TELEMETRY_INTERVAL_MS = 12000;
-  const keystrokeTracker = window.ZT.createKeystrokeTracker();
-  const mouseTracker = window.ZT.createMouseTracker();
-  keystrokeTracker.attach(document);
-  mouseTracker.attach(document);
+  const automationTracker = window.ZT.createAutomationTracker();
+  automationTracker.attach(document);
 
   // --- Shadow-DOM UI, isolated from the host page's CSS ---
   const host = document.createElement("div");
@@ -119,7 +117,7 @@
   function openStepupCard(reasons) {
     cardBody.innerHTML = `
       <h3>Step-up verification</h3>
-      <p>Your typing/mouse pattern on this tab looked unusual. Enter the one-time code to keep this tab trusted. (Demo OTP: 123456)</p>
+      <p>This tab's session signals looked unusual. Enter the one-time code to keep it trusted. (Demo OTP: 123456)</p>
       <input id="zt-otp" maxlength="6" placeholder="6-digit code" />
       <div class="err" id="zt-otp-err" style="display:none"></div>
       <button id="zt-otp-submit">Verify</button>
@@ -148,15 +146,14 @@
   });
 
   async function sendTelemetry() {
-    const keystroke = keystrokeTracker.snapshot();
-    const mouse = mouseTracker.snapshot();
-    const context = window.ZT.getContextInfo();
+    const environment = window.ZT.getEnvironment();
+    const automation = automationTracker.snapshot();
 
     let resp;
     try {
       resp = await chrome.runtime.sendMessage({
         type: "zt:telemetry",
-        payload: { keystroke, mouse, context },
+        payload: { environment, automation },
       });
     } catch {
       return; // extension context gone (e.g. reloaded) -- stop quietly

@@ -1,424 +1,96 @@
-"""AI-based risk analysis: turns a live behavior+context sample into an
-operation-conditioned trust VECTOR and a policy decision.
+"""Risk analysis: four signal families combined into an operation-indexed
+trust vector.
 
-This is the operation-conditioned pivot on the original scalar design: every
-system that computes one global trust score with one behavioral baseline per
-user shares the same weakness -- a user's typing/mouse behavior composing a
-report is not the same distribution as their behavior deleting records or
-touching admin settings, so a single baseline concentrates false positives
-(and false negatives) exactly on the sensitive operations. Here, trust is a
-vector T(t) in [0,100]^k, one component per operation class in
-config.OPERATION_CLASSES, each with its own:
+Previous versions scored keystroke and mouse dynamics. Measurement killed
+that approach: within one real session a user's mean flight time ranged
+from 170ms to 866ms, because the features tracked the TEXT being typed at
+least as much as the person typing it. A baseline that wide makes every
+subsequent sample look normal, and no threshold fixes a feature that
+carries no signal.
 
-  - behavior baseline    (operation_behavior_score)  -- s(x | r), not s(x)
-  - context weights      (operation_context_score)   -- w_i,r, not fixed w_i
-  - navigation-sequence check (transition_penalty)    -- unused signal, wired in
-  - decay rate            (update_trust_vector)        -- lambda_r
-  - decision thresholds   (config.OPERATION_CONFIG)    -- theta_r, not global
+What replaced it answers sharper questions:
 
-  T_r(t) = T_r(t-1)*e^(-lambda_r*dt) + (1-e^(-lambda_r*dt)) * evidence_r(t)
-  evidence_r(t) = clamp(0.6*behavior_score(x|r) + 0.4*context_score(x|r) - transition_penalty, 0, 100)
+  invariants      Did the machine change under a live session? A CPU core
+                  count or GPU renderer cannot change mid-session, so a
+                  change is near-proof the token moved machines. Near-zero
+                  false positives, no training data needed.
 
-behavior_score(x|r): per-(user, operation) IsolationForest trained on that
-  operation's accumulated keystroke/mouse feature vectors. Bootstraps from
-  all-operation history when the operation itself doesn't have
-  MIN_SAMPLES_FOR_MODEL samples yet, so a brand-new operation class still
-  gets a meaningful score instead of a cold-start default (the response
-  flags `bootstrapped=True` when this happens, so it's never silently
-  conflated with a real operation-specific reading).
+  impossible      Conditions that are not unusual but physically impossible:
+                  the same session used from two networks at once,
+                  impossible travel, a client clock far from the server's.
+                  Binary, so no thresholds to tune.
 
-context_score(x|r): rule-based checks against the user's known-device/
-  location history, weighted per operation (config.OPERATION_CONFIG).
+  automation      Is a human driving this, or a script? This is the realistic
+                  abuse of a stolen token, and "is this human" is a far
+                  easier question than "which human is this".
 
-transition_penalty: is this operation an unusual jump from the user's last
-  operation, per their own historical transition frequencies?
+  patterns        Learned habits -- which hours this account works, which
+                  operations it performs, its usual pace. Still statistical,
+                  but on quantities that are stable week to week rather than
+                  minute to minute.
+
+The operation-conditioned trust vector is unchanged and is still the point:
+trust is a vector T(t), one component per operation class, each decaying at
+its own rate. What is new is that the four families are blended with
+PER-OPERATION weights -- "admin" leans on session integrity and automation,
+"view" tolerates far more -- so the operations differ in what evidence they
+care about, not merely in where their thresholds sit.
+
+  T_r(t) = T_r(t-1)*(1-alpha) + alpha*evidence_r(t)
+  evidence_r = sum over families f of  w(f,r) * score(f)
 """
 
 import math
 from datetime import datetime
 from typing import List, Optional, Tuple
 
-import numpy as np
-from sklearn.ensemble import IsolationForest
 from sqlalchemy import func
 from sqlalchemy.orm import Session as DBSession
 
-from app.config import OPERATION_CONFIG, TRANSITION_MAX_PENALTY, TRANSITION_MIN_HISTORY, TRANSITION_RARE_FREQUENCY
-from app.model_store import model_store
-from app.models import AuthSession, BehaviorSample, KnownContext, OperationTransition, OperationTrust
-from app.schemas import ContextSample, KeystrokeSample, MouseSample
+from app.config import (
+    OPERATION_CONFIG,
+    TRANSITION_MAX_PENALTY,
+    TRANSITION_MIN_HISTORY,
+    TRANSITION_RARE_FREQUENCY,
+)
+from app.models import AuthSession, OperationTransition, OperationTrust
+from app.signals import access_patterns, automation, impossible, invariants
 
-# An IsolationForest needs meaningfully more than a handful of points in this
-# 8-dimensional feature space to say anything at all. Measured on this
-# feature set: at 5 samples it returns the *same* score for a normal sample
-# and a 3x-faster-typing anomaly (no discriminative power whatsoever), and it
-# only starts ranking anomalies below normal samples at ~10, with clear
-# separation from ~20. Handing over to it at 5 produced a large scoring
-# discontinuity -- identical behavior scored ~96 on the statistical path and
-# ~50 the moment the forest took over. Below this threshold the standardized
-# per-feature distance path is both better behaved and better calibrated.
-MIN_SAMPLES_FOR_MODEL = 20
-FEATURE_ORDER = [
-    "mean_dwell_ms",
-    "std_dwell_ms",
-    "mean_flight_ms",
-    "std_flight_ms",
-    "mean_velocity",
-    "std_velocity",
-    "mean_acceleration",
-    "direction_changes",
-]
+FAMILIES = ("integrity", "impossible", "automation", "patterns")
 
-# Typing and mousing are independent modalities, and a user very often does
-# one without the other -- typing a sentence without touching the mouse is
-# completely normal. The collectors report zeros for whichever modality saw
-# no events, and those zeros must be treated as MISSING, not as observed
-# values: scoring "mouse velocity 0" against a baseline of 0.8 reads as a
-# severe anomaly for the ordinary act of not touching the mouse, and storing
-# it drags the baseline toward zero so later real movement looks anomalous.
-KEYSTROKE_FEATURES = {"mean_dwell_ms", "std_dwell_ms", "mean_flight_ms", "std_flight_ms"}
-MOUSE_FEATURES = {"mean_velocity", "std_velocity", "mean_acceleration", "direction_changes"}
-
-# A handful of events gives a meaningless average -- a 3-key burst says
-# nothing about someone's typing rhythm, but it still lands in the baseline
-# and widens its spread. Below these counts the modality is treated as not
-# measured for this sample (same path as not touching it at all).
-MIN_KEYS_FOR_SIGNAL = 8
-MIN_POINTS_FOR_SIGNAL = 15
-
-# km/h an implied-travel-speed above this is not humanly possible between two logins
-IMPOSSIBLE_TRAVEL_KMH = 900.0
-EARTH_RADIUS_KM = 6371.0
+# Families whose collapse is near-proof of compromise rather than merely
+# unusual: the machine changed, the session is in two places at once, or the
+# browser is advertising automation. Trust is capped at the lowest of these,
+# because a weighted mean alone lets a catastrophic failure in one family be
+# averaged away by the others -- a session with a changed GPU AND a
+# webdriver flag still cleared "view" purely because its travel and habits
+# looked normal. "patterns" is excluded: it is the one statistical family
+# here, and an odd working hour should colour the score, never cap it.
+GATING_FAMILIES = ("integrity", "impossible", "automation")
 
 
-def featurize(keystroke: KeystrokeSample, mouse: MouseSample) -> dict:
-    # key_count / point_count are carried alongside the features so that both
-    # scoring and stored history know which modalities this sample actually
-    # observed (see KEYSTROKE_FEATURES / MOUSE_FEATURES above).
-    return {
-        "mean_dwell_ms": keystroke.mean_dwell_ms,
-        "std_dwell_ms": keystroke.std_dwell_ms,
-        "mean_flight_ms": keystroke.mean_flight_ms,
-        "std_flight_ms": keystroke.std_flight_ms,
-        "mean_velocity": mouse.mean_velocity,
-        "std_velocity": mouse.std_velocity,
-        "mean_acceleration": mouse.mean_acceleration,
-        "direction_changes": float(mouse.direction_changes),
-        "key_count": float(keystroke.key_count),
-        "point_count": float(mouse.point_count),
-    }
-
-
-def present_features(features: dict) -> List[str]:
-    """Which of FEATURE_ORDER this sample measured enough events to trust."""
-    present = []
-    if features.get("key_count", 0) >= MIN_KEYS_FOR_SIGNAL:
-        present += [f for f in FEATURE_ORDER if f in KEYSTROKE_FEATURES]
-    if features.get("point_count", 0) >= MIN_POINTS_FOR_SIGNAL:
-        present += [f for f in FEATURE_ORDER if f in MOUSE_FEATURES]
-    return present
-
-
-def _sample_has(sample_features: dict, feature: str) -> bool:
-    """Did a stored history sample measure enough of this feature's modality
-    to belong in its baseline? Samples written before modality tracking carry
-    no counts; treat those as present so existing baselines keep working."""
-    if feature in KEYSTROKE_FEATURES:
-        return sample_features.get("key_count", MIN_KEYS_FOR_SIGNAL) >= MIN_KEYS_FOR_SIGNAL
-    if feature in MOUSE_FEATURES:
-        return sample_features.get("point_count", MIN_POINTS_FOR_SIGNAL) >= MIN_POINTS_FOR_SIGNAL
-    return True
-
-
-def _vector(features: dict) -> np.ndarray:
-    return np.array([[features[k] for k in FEATURE_ORDER]], dtype=float)
-
-
-def _history_matrix(samples: List[BehaviorSample]) -> np.ndarray:
-    return np.array(
-        [[s.features.get(k, 0.0) for k in FEATURE_ORDER] for s in samples], dtype=float
-    )
-
-
-# How much natural sample-to-sample variation to assume for a feature before
-# any real variance has been observed (e.g. a single baseline sample, where
-# std is literally 0). A flat absolute floor here is wrong: 1.0 is far too
-# tight for a ~90ms dwell-time feature (any normal 15-20ms human variation
-# between heartbeats reads as a huge z-score) and too loose for a ~0.01
-# acceleration feature. Scaling the floor to the feature's own magnitude
-# fixes both directions at once.
-RELATIVE_STD_FLOOR = 0.15
-ABSOLUTE_STD_FLOOR = 1e-3
-
-# Minimum spread to assume among IsolationForest score_samples values. Their
-# scale is unrelated to the raw features', so this needs its own floor.
-ISOFOREST_SCORE_STD_FLOOR = 0.01
-
-
-def _safe_std(std: np.ndarray, mean: np.ndarray) -> np.ndarray:
-    return np.maximum(std, np.maximum(RELATIVE_STD_FLOOR * np.abs(mean), ABSOLUTE_STD_FLOOR))
-
-
-# Scales median-absolute-deviation to be comparable to a standard deviation
-# for normally distributed data, so the same "z * 20" scoring curve applies.
-MAD_TO_STD = 1.4826
-
-
-def _feature_baseline(samples: List[BehaviorSample], feature: str) -> Tuple[Optional[float], float]:
-    """Centre and spread of one feature, over only the history samples that
-    actually observed its modality (so keyboard-only samples can't drag the
-    mouse baseline toward zero, or vice versa).
-
-    Uses median + MAD rather than mean + std because this history is real
-    human behavior and contains outliers: one distracted sample with a long
-    pause permanently inflated an std-based spread, and a spread that wide
-    makes every later sample look normal no matter how fast or slow it is.
-    A measured session reached std=430ms on flight time, which meant the
-    user had to pause over 1.2s between keys before anything registered.
-    The median and MAD simply ignore those few extreme samples."""
-    vals = [
-        float(s.features.get(feature, 0.0))
-        for s in samples
-        if _sample_has(s.features, feature)
-    ]
-    if not vals:
-        return None, 0.0
-    arr = np.array(vals, dtype=float)
-    centre = float(np.median(arr))
-    mad = float(np.median(np.abs(arr - centre)))
-    return centre, mad * MAD_TO_STD
-
-
-def _per_feature_scores(features: dict, samples: List[BehaviorSample]) -> List[dict]:
-    """Per-parameter breakdown. Features whose modality this sample did not
-    observe are reported as not-observed and excluded from scoring entirely,
-    rather than being compared as if a zero had been measured."""
-    observed = set(present_features(features))
-    results = []
-
-    for key in FEATURE_ORDER:
-        if key not in observed:
-            results.append(
-                {"name": key, "value": None, "baseline_mean": None,
-                 "z_score": 0.0, "score": None, "observed": False}
-            )
-            continue
-
-        value = float(features[key])
-        mean, std = _feature_baseline(samples, key)
-        if mean is None:
-            results.append(
-                {"name": key, "value": round(value, 3), "baseline_mean": None,
-                 "z_score": 0.0, "score": 100.0, "observed": True}
-            )
-            continue
-
-        safe = max(std, RELATIVE_STD_FLOOR * abs(mean), ABSOLUTE_STD_FLOOR)
-        z = abs((value - mean) / safe)
-        results.append(
-            {"name": key, "value": round(value, 3), "baseline_mean": round(mean, 3),
-             "z_score": round(z, 3), "score": round(max(0.0, min(100.0, 100.0 - z * 20.0)), 1),
-             "observed": True}
-        )
-    return results
-
-
-def _samples_for(db: DBSession, user_id: str, operation: Optional[str]) -> List[BehaviorSample]:
-    q = db.query(BehaviorSample).filter(BehaviorSample.user_id == user_id)
-    if operation is not None:
-        q = q.filter(BehaviorSample.operation == operation)
-    return q.order_by(BehaviorSample.created_at.asc()).all()
-
-
-def operation_behavior_score(
-    db: DBSession, user_id: str, operation: str, features: dict
-) -> Tuple[float, List[dict], bool]:
-    """s(x | r): anomaly score of `features` against the baseline for this
-    (user, operation) pair specifically -- not the user's global baseline.
-    Returns (score, per_feature_breakdown, bootstrapped) where bootstrapped
-    is True when this operation didn't yet have enough of its own history
-    and the all-operations history was used to avoid a meaningless cold-start
-    default."""
-    op_samples = _samples_for(db, user_id, operation)
-    bootstrapped = False
-    samples = op_samples
-    if len(op_samples) < MIN_SAMPLES_FOR_MODEL:
-        samples = _samples_for(db, user_id, None)
-        bootstrapped = True
-
-    feature_scores = _per_feature_scores(features, samples)
-
-    if not samples:
-        return 100.0, feature_scores, bootstrapped
-
-    # The standardized-distance detector ALWAYS runs, at every sample count.
-    # It is well behaved on the handful of samples a real user actually
-    # accumulates, it is monotonic (further from baseline always scores
-    # lower), and it is directly interpretable -- the same z-scores shown in
-    # the per-parameter breakdown. The IsolationForest below can only pull
-    # this score down, never push it up, so an anomaly this detector catches
-    # can never be masked by the forest calling it normal.
-    #
-    # Only features this sample actually observed take part: a keyboard-only
-    # sample is scored purely on its 4 keystroke features instead of being
-    # punished for four "zero" mouse readings it never measured.
-    #
-    # RMS, not a plain mean: typing unusually fast only shifts the keystroke
-    # features, and a plain average lets unaffected features dilute a real
-    # anomaly. RMS weights large deviations more heavily.
-    observed_z = [f["z_score"] for f in feature_scores if f["observed"] and f["score"] is not None]
-    if not observed_z:
-        return 100.0, feature_scores, bootstrapped
-    agg_z = float(np.sqrt(np.mean(np.array(observed_z, dtype=float) ** 2)))
-    statistical_score = float(max(0.0, 100.0 - agg_z * 20.0))
-
-    if len(samples) < MIN_SAMPLES_FOR_MODEL:
-        return statistical_score, feature_scores, bootstrapped
-
-    vector = _vector(features)
-    history = _history_matrix(samples)
-
-    # model key includes the operation so "view"/"edit"/"admin" baselines
-    # for the same user never overwrite each other in the ModelStore.
-    # contamination is low, not 0.15: this history is only ever samples the
-    # engine already decided to trust (allow-decisions), so assuming 15% of
-    # it is anomalous makes the model carve a needlessly tight boundary
-    # around the user's own normal behavior.
-    model = IsolationForest(n_estimators=100, contamination=0.02, random_state=42)
-    model.fit(history)
-    model_store.save(f"{user_id}__{operation}" if not bootstrapped else f"{user_id}__all", model)
-
-    # Score the new sample RELATIVE to how the user's own history scores,
-    # rather than against an assumed absolute range. decision_function does
-    # not really span [-0.5, 0.5] -- for a tight cluster it returns values
-    # near 0, so a fixed (raw + 0.5) * 100 mapping pins even perfectly
-    # consistent behavior into a ~45-60 band forever. Measuring how far
-    # below the training set's own mean anomaly score this sample falls,
-    # in units of that set's spread, is self-calibrating per user and uses
-    # the same "deviation * 20" scale as the cold-start branch above -- so
-    # crossing MIN_SAMPLES_FOR_MODEL no longer produces a scoring cliff.
-    train_scores = model.score_samples(history)
-    new_score = float(model.score_samples(vector)[0])
-    ref_mean = float(train_scores.mean())
-    # Floor is a small absolute value on the score_samples scale (which spans
-    # roughly 0.05-0.1 across a trained set). RELATIVE_STD_FLOOR is deliberately
-    # NOT used here: it is a fraction of a feature's magnitude, which is
-    # meaningful for raw features (15% of a 90ms dwell time is real jitter) but
-    # meaningless against score_samples' arbitrary ~-0.47 offset, where it would
-    # dwarf the true spread and flatten every anomaly into "normal".
-    ref_std = float(max(train_scores.std(), ISOFOREST_SCORE_STD_FLOOR))
-
-    deviation = max(0.0, (ref_mean - new_score) / ref_std)  # only penalize being MORE anomalous than usual
-    forest_score = float(max(0.0, min(100.0, 100.0 - deviation * 20.0)))
-
-    # Take the more conservative of the two detectors. The forest contributes
-    # genuine value -- it can catch odd *combinations* of features that each
-    # look individually normal, which per-feature distance cannot -- but it
-    # must not be able to vouch for a sample the statistical detector has
-    # already flagged. Measured on this feature set, the forest scored a
-    # 210ms-dwell / 420ms-flight sample (vs a 90/110 baseline) as perfectly
-    # normal; min() makes that impossible to act on.
-    return min(statistical_score, forest_score), feature_scores, bootstrapped
-
-
-def _haversine_km(lat1, lon1, lat2, lon2) -> float:
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
-    return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
-
-
-def operation_context_score(
-    db: DBSession,
-    user_id: str,
-    operation: str,
-    context: ContextSample,
-    geo: Tuple[float, float, str, str] | None,
-) -> Tuple[float, List[str], List[dict]]:
-    """w_i,r applied: the same unrecognized-device / impossible-travel checks
-    as before, but penalized by this operation's own weights -- an
-    unfamiliar device costs far more on "admin" than on "view"."""
-    cfg = OPERATION_CONFIG[operation]
-    score = 100.0
-    reasons: List[str] = []
-    checks: List[dict] = []
-
-    known = (
-        db.query(KnownContext)
-        .filter(KnownContext.user_id == user_id, KnownContext.device_fingerprint == context.device_fingerprint)
-        .first()
-    )
-    if known is None:
-        score -= cfg["device_weight"]
-        reasons.append(f"Unrecognized device fingerprint (weighted {cfg['device_weight']:.0f} for '{operation}')")
-        checks.append(
-            {
-                "name": "Device fingerprint",
-                "score": max(0.0, 100.0 - cfg["device_weight"]),
-                "detail": f"Unrecognized device -- {cfg['device_weight']:.0f}pt penalty for '{operation}'",
-            }
-        )
-    else:
-        checks.append({"name": "Device fingerprint", "score": 100.0, "detail": "Recognized device"})
-
-    if geo is None:
-        checks.append({"name": "Location plausibility", "score": 100.0, "detail": "No geolocation available"})
-    else:
-        lat, lon, city, country = geo
-        last_known = (
-            db.query(KnownContext)
-            .filter(KnownContext.user_id == user_id, KnownContext.geo_lat.isnot(None))
-            .order_by(KnownContext.last_seen.desc())
-            .first()
-        )
-        if last_known is None or last_known.geo_lat is None:
-            checks.append({"name": "Location plausibility", "score": 100.0, "detail": "No prior location on record"})
-        else:
-            distance_km = _haversine_km(last_known.geo_lat, last_known.geo_lon, lat, lon)
-            elapsed_hours = max(
-                (datetime.utcnow() - last_known.last_seen).total_seconds() / 3600.0, 0.01
-            )
-            implied_speed = distance_km / elapsed_hours
-            if implied_speed > IMPOSSIBLE_TRAVEL_KMH and distance_km > 100:
-                score -= cfg["location_weight"]
-                detail = (
-                    f"Impossible travel: {distance_km:.0f}km in {elapsed_hours:.1f}h "
-                    f"(~{implied_speed:.0f} km/h) since last seen in {last_known.geo_city}, {last_known.geo_country} "
-                    f"(weighted {cfg['location_weight']:.0f} for '{operation}')"
-                )
-                reasons.append(detail)
-                checks.append({"name": "Location plausibility", "score": max(0.0, 100.0 - cfg["location_weight"]), "detail": detail})
-            else:
-                checks.append(
-                    {
-                        "name": "Location plausibility",
-                        "score": 100.0,
-                        "detail": f"{distance_km:.0f}km since last seen -- plausible",
-                    }
-                )
-
-    return max(0.0, score), reasons, checks
-
-
-def transition_penalty(db: DBSession, user_id: str, last_operation: Optional[str], operation: str) -> Tuple[float, Optional[str]]:
-    """Section 5 lists session-navigation flow as a collected signal; this is
-    where it's actually used. A user's typical path (e.g. view -> edit) is
-    learned as a frequency table; a rare jump (e.g. straight to admin) is
-    penalized in proportion to how rare it's been for this specific user."""
+def transition_penalty(
+    db: DBSession, user_id: str, last_operation: Optional[str], operation: str
+) -> Tuple[float, Optional[str]]:
+    """Navigation-sequence check: is this jump rare for this user? Kept from
+    the previous engine -- it was the one behavioral signal that did not
+    depend on typing."""
     if not last_operation or last_operation == operation:
         return 0.0, None
 
     total = (
         db.query(func.sum(OperationTransition.count))
-        .filter(OperationTransition.user_id == user_id, OperationTransition.from_operation == last_operation)
+        .filter(
+            OperationTransition.user_id == user_id,
+            OperationTransition.from_operation == last_operation,
+        )
         .scalar()
         or 0
     )
     if total < TRANSITION_MIN_HISTORY:
-        return 0.0, None  # not enough navigation history yet to call anything "unusual"
+        return 0.0, None
 
-    this_row = (
+    row = (
         db.query(OperationTransition)
         .filter(
             OperationTransition.user_id == user_id,
@@ -427,23 +99,19 @@ def transition_penalty(db: DBSession, user_id: str, last_operation: Optional[str
         )
         .first()
     )
-    this_count = this_row.count if this_row else 0
-    freq = this_count / total
-
+    freq = (row.count if row else 0) / total
     if freq < TRANSITION_RARE_FREQUENCY:
         penalty = TRANSITION_MAX_PENALTY * (1.0 - freq / TRANSITION_RARE_FREQUENCY)
-        reason = (
-            f"Unusual navigation: '{last_operation}' -> '{operation}' seen in only "
-            f"{freq * 100:.0f}% of your past transitions from '{last_operation}'"
+        return round(penalty, 1), (
+            f"Unusual navigation: '{last_operation}' -> '{operation}' is "
+            f"{freq * 100:.0f}% of this account's moves from '{last_operation}'"
         )
-        return round(penalty, 1), reason
-
     return 0.0, None
 
 
 def _record_transition(db: DBSession, user_id: str, last_operation: Optional[str], operation: str) -> None:
     if not last_operation:
-        return  # first operation of the session -- nothing to record a transition from
+        return
     row = (
         db.query(OperationTransition)
         .filter(
@@ -454,52 +122,42 @@ def _record_transition(db: DBSession, user_id: str, last_operation: Optional[str
         .first()
     )
     if row is None:
-        row = OperationTransition(user_id=user_id, from_operation=last_operation, to_operation=operation, count=0)
+        row = OperationTransition(
+            user_id=user_id, from_operation=last_operation, to_operation=operation, count=0
+        )
         db.add(row)
     row.count += 1
 
 
 def update_trust_vector(db: DBSession, session: AuthSession, operation: str, evidence: float) -> float:
-    """T_r(t) = T_r(t-1)*e^(-lambda_r*dt) + (1-e^(-lambda_r*dt))*evidence.
-    Decay is applied lazily: dt is the real elapsed time since this specific
-    operation's component was last touched, so operations you haven't
-    performed in a while don't silently drift -- they only update (and only
-    decay toward fresh evidence) the next time you actually perform them."""
-    lam = OPERATION_CONFIG[operation]["decay_rate"]
+    """T_r(t) = T_r(t-1)*(1-alpha) + alpha*evidence, with alpha driven by
+    elapsed time but floored per operation so every reading counts."""
+    cfg = OPERATION_CONFIG[operation]
     row = db.query(OperationTrust).filter_by(session_id=session.id, operation=operation).first()
     now = datetime.utcnow()
 
     if row is None:
-        # first time this operation is evaluated this session: start from evidence,
-        # matching the original scalar model's "session starts at 100" semantics
-        # would be wrong here -- a session's first admin action still has to earn
-        # its own trust rather than inheriting a global 100.
         new_value = evidence
-        row = OperationTrust(session_id=session.id, operation=operation, trust_score=new_value, updated_at=now)
+        row = OperationTrust(
+            session_id=session.id, operation=operation, trust_score=new_value, updated_at=now
+        )
         db.add(row)
     else:
         dt = max((now - row.updated_at).total_seconds(), 0.0)
-        # Weight on the new reading. The decay term alone leaves this at ~0
-        # when little time has passed, which froze trust entirely; the
-        # per-operation floor guarantees every observation actually counts.
-        alpha = max(1.0 - math.exp(-lam * dt), OPERATION_CONFIG[operation]["min_evidence_weight"])
+        alpha = max(1.0 - math.exp(-cfg["decay_rate"] * dt), cfg["min_evidence_weight"])
         new_value = row.trust_score * (1.0 - alpha) + alpha * evidence
         row.trust_score = new_value
         row.updated_at = now
 
-    # the DB session has autoflush disabled, and trust_vector() (called right
-    # after this in evaluate()) reads OperationTrust back via a fresh query --
-    # without flushing here, that query misses this pending change and
-    # reports the stale value.
-    db.flush()
+    db.flush()  # session has autoflush off; trust_vector() reads this back
     return float(max(0.0, min(100.0, new_value)))
 
 
 def trust_vector(db: DBSession, session: AuthSession) -> List[dict]:
-    """The full vector T(t): every operation class's current component,
-    defaulting unevaluated operations to 100 (a session starts fully
-    trusted for anything it hasn't tried yet, same as the original model)."""
-    rows = {r.operation: r.trust_score for r in db.query(OperationTrust).filter_by(session_id=session.id).all()}
+    rows = {
+        r.operation: r.trust_score
+        for r in db.query(OperationTrust).filter_by(session_id=session.id).all()
+    }
     result = []
     for op, cfg in OPERATION_CONFIG.items():
         score = rows.get(op, 100.0)
@@ -509,15 +167,13 @@ def trust_vector(db: DBSession, session: AuthSession) -> List[dict]:
             decision = "stepup"
         else:
             decision = "terminate"
-        result.append(
-            {
-                "operation": op,
-                "trust_score": round(score, 2),
-                "decision": decision,
-                "allow_threshold": cfg["allow_threshold"],
-                "stepup_threshold": cfg["stepup_threshold"],
-            }
-        )
+        result.append({
+            "operation": op,
+            "trust_score": round(score, 2),
+            "decision": decision,
+            "allow_threshold": cfg["allow_threshold"],
+            "stepup_threshold": cfg["stepup_threshold"],
+        })
     return result
 
 
@@ -525,64 +181,78 @@ def evaluate(
     db: DBSession,
     session: AuthSession,
     operation: str,
-    keystroke: KeystrokeSample,
-    mouse: MouseSample,
-    context: ContextSample,
+    environment: dict,
+    automation_signals: dict,
     ip_address: str,
-    geo: Tuple[float, float, str, str] | None,
+    geo: Optional[Tuple[float, float, str, str]],
 ) -> dict:
     if operation not in OPERATION_CONFIG:
         operation = "view"
 
+    cfg = OPERATION_CONFIG[operation]
     user_id = session.user_id
+    now = datetime.utcnow()
+    actions = automation_signals.get("action_count") or 0
 
-    if keystroke.key_count == 0 and mouse.point_count == 0:
-        # No keyboard/mouse activity happened since the last heartbeat --
-        # this is "no data", not "abnormal data". A zero-filled feature
-        # vector compared against a non-zero baseline reads as a huge
-        # deviation, which would otherwise punish a user for the simple act
-        # of not touching the keyboard/mouse for 12s. Leave the vector
-        # completely untouched and report its current state instead of
-        # scoring this heartbeat at all.
-        current_vector = trust_vector(db, session)
-        current = next((v for v in current_vector if v["operation"] == operation), None)
-        idle_score = current["trust_score"] if current else 100.0
-        idle_decision = current["decision"] if current else "allow"
+    # An interval with no interaction at all carries no evidence about who is
+    # present. Scoring it would punish a user for reading the screen, so the
+    # session's state is reported unchanged instead -- the same reasoning that
+    # applies to any missing signal.
+    if actions == 0:
+        current = trust_vector(db, session)
+        entry = next((v for v in current if v["operation"] == operation), None)
         return {
             "operation": operation,
-            "behavior_score": idle_score,
-            "context_score": idle_score,
-            "evidence_score": None,
-            "trust_score": idle_score,
-            "decision": idle_decision,
-            "reasons": [],
-            "features": {},
-            "feature_scores": [],
-            "context_checks": [],
-            "bootstrapped": False,
-            "trust_vector": current_vector,
-            "idle": True,
+            "trust_score": entry["trust_score"] if entry else 100.0,
+            "decision": entry["decision"] if entry else "allow",
+            "family_scores": {}, "reasons": [], "context_checks": [],
+            "trust_vector": current, "idle": True,
         }
 
-    features = featurize(keystroke, mouse)
-    b_score, feature_scores, bootstrapped = operation_behavior_score(db, user_id, operation, features)
-    c_score, reasons, context_checks = operation_context_score(db, user_id, operation, context, geo)
+    integrity_score, integrity_reasons, integrity_checks = invariants.evaluate(
+        session.sealed_context or {}, environment
+    )
+    impossible_score, impossible_reasons, impossible_checks = impossible.evaluate(
+        db, user_id, session.id, ip_address, geo, environment, now
+    )
+    automation_score, automation_reasons, automation_checks = automation.evaluate(automation_signals)
+    pattern_score, pattern_reasons, pattern_checks = access_patterns.evaluate(
+        db, user_id, operation, now, actions
+    )
+
     t_penalty, t_reason = transition_penalty(db, user_id, session.last_operation, operation)
+    reasons = integrity_reasons + impossible_reasons + automation_reasons + pattern_reasons
+    checks = integrity_checks + impossible_checks + automation_checks + pattern_checks
 
     if t_reason:
         reasons.append(t_reason)
-        context_checks.append({"name": "Navigation pattern", "score": max(0.0, 100.0 - t_penalty), "detail": t_reason})
+        checks.append({"name": "Navigation pattern", "score": max(0.0, 100.0 - t_penalty),
+                       "detail": t_reason})
     else:
-        detail = "Consistent with your usual navigation" if session.last_operation else "First operation this session"
-        context_checks.append({"name": "Navigation pattern", "score": 100.0, "detail": detail})
+        checks.append({"name": "Navigation pattern", "score": 100.0,
+                       "detail": "Consistent with usual navigation" if session.last_operation
+                                 else "First operation this session"})
 
-    evidence = max(0.0, min(100.0, 0.6 * b_score + 0.4 * c_score - t_penalty))
+    family_scores = {
+        "integrity": round(integrity_score, 1),
+        "impossible": round(impossible_score, 1),
+        "automation": round(automation_score, 1),
+        "patterns": round(pattern_score, 1),
+    }
+
+    # Per-operation weighting: what counts as evidence differs by how
+    # sensitive the operation is, not just where its threshold sits.
+    weights = cfg["family_weights"]
+    weighted = sum(weights[f] * family_scores[f] for f in FAMILIES)
+    # Trust cannot exceed the weakest decisive signal, however healthy the
+    # rest look. See GATING_FAMILIES.
+    gate = min(family_scores[f] for f in GATING_FAMILIES)
+    evidence = max(0.0, min(100.0, min(weighted, gate) - t_penalty))
+
     updated_trust = update_trust_vector(db, session, operation, evidence)
-
     _record_transition(db, user_id, session.last_operation, operation)
     session.last_operation = operation
 
-    cfg = OPERATION_CONFIG[operation]
     if updated_trust >= cfg["allow_threshold"]:
         decision = "allow"
     elif updated_trust >= cfg["stepup_threshold"]:
@@ -592,59 +262,46 @@ def evaluate(
 
     return {
         "operation": operation,
-        "behavior_score": b_score,
-        "context_score": c_score,
-        "evidence_score": evidence,
+        "family_scores": family_scores,
+        "family_weights": weights,
+        "evidence_score": round(evidence, 1),
         "trust_score": updated_trust,
         "decision": decision,
         "reasons": reasons,
-        "features": features,
-        "feature_scores": feature_scores,
-        "context_checks": context_checks,
-        "bootstrapped": bootstrapped,
+        "context_checks": checks,
+        "actions": actions,
         "trust_vector": trust_vector(db, session),
         "idle": False,
     }
 
 
 def suggest_threshold_calibration(db: DBSession) -> dict:
-    """Starter method for calibrating theta_r / w_i,r from the audit log
-    instead of hand-picking them, answering the "no concrete calibration
-    method" gap. This is a simple frequency-based heuristic over RiskEvent
-    (friction proxy: step-ups the user then verified correctly, i.e. almost
-    certainly false positives), NOT a full expected-loss optimizer -- there's
-    no labeled breach/attack data in an audit log to estimate a real breach
-    likelihood from, so a true
-    `argmin_theta friction_cost*P(false step-up) + breach_cost*P(missed attack)`
-    optimization needs either labeled incident data or a simulated attacker
-    model, neither of which exists here. This gives a defensible starting
-    point (and the shape the real optimizer would plug into), not a finished
-    calibration.
-    """
+    """Starter calibration from the audit log. A frequency heuristic, not an
+    expected-loss optimiser: an audit log records what this system chose to
+    do, never whether it was right, so a true cost-optimal calibration needs
+    labelled incidents that no deployment here has."""
     from app.models import RiskEvent
 
     suggestions = {}
     for operation, cfg in OPERATION_CONFIG.items():
         events = db.query(RiskEvent).filter(RiskEvent.operation == operation).all()
-        stepups = [e for e in events if e.decision == "stepup"]
         if len(events) < 20:
             suggestions[operation] = {
                 "status": "insufficient_data",
                 "events_seen": len(events),
-                "note": "Need more audit-log volume for this operation before suggesting a threshold change.",
+                "note": "Need more audit-log volume before suggesting a change.",
             }
             continue
-        stepup_rate = len(stepups) / len(events)
-        suggestion = dict(cfg)
-        if stepup_rate > 0.25:
-            # step-ups firing on >25% of events for a sensitive operation suggests
-            # too much friction -- nudge the threshold down slightly
-            suggestion["stepup_threshold"] = round(cfg["stepup_threshold"] * 0.95, 1)
+        stepups = [e for e in events if e.decision == "stepup"]
+        rate = len(stepups) / len(events)
+        suggested = dict(cfg)
+        if rate > 0.25:
+            suggested["stepup_threshold"] = round(cfg["stepup_threshold"] * 0.95, 1)
         suggestions[operation] = {
             "status": "ok",
             "events_seen": len(events),
-            "observed_stepup_rate": round(stepup_rate, 3),
+            "observed_stepup_rate": round(rate, 3),
             "current": cfg,
-            "suggested": suggestion,
+            "suggested": suggested,
         }
     return suggestions

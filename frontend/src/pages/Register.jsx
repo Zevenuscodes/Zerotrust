@@ -2,10 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../context/AuthContext";
-import { createKeystrokeTracker } from "../telemetry/keystroke";
-import { createMouseTracker } from "../telemetry/mouse";
 import { createPhraseTracker } from "../telemetry/phrase";
-import { getContextInfo } from "../telemetry/fingerprint";
+import { getEnvironment } from "../telemetry/environment";
 import Brand from "../components/Brand";
 
 const BASELINE_PASSPHRASE = "the quick zero trust fox verifies every packet";
@@ -33,22 +31,15 @@ export default function Register() {
       }
     })
   );
-  const keystrokeTracker = useRef(createKeystrokeTracker());
-  const mouseTracker = useRef(createMouseTracker());
   const navigate = useNavigate();
   const { login } = useAuth();
 
   useEffect(() => {
-    const detachMouse = mouseTracker.current.attach(document);
-    let detachKeys = () => {};
     let detachPhrase = () => {};
     if (phraseRef.current) {
-      detachKeys = keystrokeTracker.current.attach(phraseRef.current);
       detachPhrase = phraseTracker.current.attach(phraseRef.current);
     }
     return () => {
-      detachMouse();
-      detachKeys();
       detachPhrase();
     };
   }, []);
@@ -71,9 +62,7 @@ export default function Register() {
       const resp = await api.register({
         username,
         password,
-        keystroke: keystrokeTracker.current.snapshot(),
-        mouse: mouseTracker.current.snapshot(),
-        context: getContextInfo(),
+        environment: getEnvironment(),
         phrase_enrollments: enrollments,
       });
       login(resp.access_token, username);

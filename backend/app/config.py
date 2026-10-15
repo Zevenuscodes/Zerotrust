@@ -114,30 +114,48 @@ OPERATION_CLASSES = ["view", "edit", "admin"]
 # absorbed only ~7% of each reading and barely moved while behavior swung
 # from 0 to 93. The floor keeps every observation meaningful while the decay
 # rates still set how much history each operation carries between readings.
+#
+# family_weights is what makes each operation care about DIFFERENT evidence,
+# not merely apply a different threshold to the same number. Reading a page
+# can tolerate an odd hour or an unfamiliar rhythm; an admin action leans
+# almost entirely on whether the session is still bound to the machine it
+# was issued to and whether a human is driving it. Each row sums to 1.
 OPERATION_CONFIG = {
     "view": {
         "decay_rate": 0.006,  # ~115s half-life -- slow to change
         "min_evidence_weight": 0.25,
-        "device_weight": 10.0,
-        "location_weight": 15.0,
         "allow_threshold": 55.0,
         "stepup_threshold": 35.0,
+        "family_weights": {
+            "integrity": 0.35,
+            "impossible": 0.25,
+            "automation": 0.20,
+            "patterns": 0.20,
+        },
     },
     "edit": {
         "decay_rate": 0.02,  # ~35s half-life
         "min_evidence_weight": 0.4,
-        "device_weight": 25.0,
-        "location_weight": 35.0,
         "allow_threshold": 65.0,
         "stepup_threshold": 45.0,
+        "family_weights": {
+            "integrity": 0.40,
+            "impossible": 0.25,
+            "automation": 0.25,
+            "patterns": 0.10,
+        },
     },
     "admin": {
         "decay_rate": 0.06,  # ~11.5s half-life -- must be re-earned almost every heartbeat
         "min_evidence_weight": 0.6,
-        "device_weight": 45.0,
-        "location_weight": 60.0,
         "allow_threshold": 75.0,
         "stepup_threshold": 55.0,
+        "family_weights": {
+            "integrity": 0.45,
+            "impossible": 0.25,
+            "automation": 0.25,
+            "patterns": 0.05,
+        },
     },
 }
 

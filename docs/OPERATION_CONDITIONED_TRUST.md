@@ -23,9 +23,7 @@ evidence_r(t) = clamp(0.6·behavior_score(x|r) + 0.4·context_score(x|r) - trans
 ```
 
 - `r` — an operation class (`view`, `edit`, `admin` in this implementation)
-- `behavior_score(x|r)` — anomaly score of the current sample against a
-  baseline trained **only on that user's history for operation `r`**, not
-  their global history
+- the four signal families, scored independently (see `SIGNALS.md`)
 - `context_score(x|r)` — the same device-fingerprint / impossible-travel
   checks as before, but penalized by **per-operation weights** `w_i,r`
   (an unfamiliar device costs far more on `admin` than on `view`)

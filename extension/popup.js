@@ -2,9 +2,7 @@ const BASELINE_PASSPHRASE = "the quick zero trust fox verifies every packet";
 const app = document.getElementById("app");
 
 let authTab = "login"; // "login" | "register"
-const keystrokeTracker = window.ZT.createKeystrokeTracker();
-const mouseTracker = window.ZT.createMouseTracker();
-mouseTracker.attach(document);
+
 
 async function store(keys) {
   return chrome.storage.local.get(keys);
@@ -84,7 +82,6 @@ function renderLoginForm() {
     </form>
   `;
   const passwordInput = document.getElementById("login-password");
-  keystrokeTracker.attach(passwordInput);
 
   document.getElementById("login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -96,12 +93,9 @@ function renderLoginForm() {
     submitBtn.disabled = true;
     submitBtn.textContent = "Logging in...";
     try {
-      const keystroke = keystrokeTracker.snapshot();
-      const mouse = mouseTracker.snapshot();
-      const context = window.ZT.getContextInfo();
       const resp = await apiRequest("/auth/login", {
         method: "POST",
-        body: { username, password, keystroke, mouse, context },
+        body: { username, password, environment: window.ZT.getEnvironment() },
       });
       await setStore({ zt_token: resp.access_token, zt_username: username, zt_session_id: resp.session_id });
       render();
@@ -131,7 +125,6 @@ function renderRegisterForm() {
     </form>
   `;
   const passphraseInput = document.getElementById("reg-passphrase");
-  keystrokeTracker.attach(passphraseInput);
 
   document.getElementById("register-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -151,12 +144,9 @@ function renderRegisterForm() {
     submitBtn.disabled = true;
     submitBtn.textContent = "Registering...";
     try {
-      const keystroke = keystrokeTracker.snapshot();
-      const mouse = mouseTracker.snapshot();
-      const context = window.ZT.getContextInfo();
       const resp = await apiRequest("/auth/register", {
         method: "POST",
-        body: { username, password, keystroke, mouse, context },
+        body: { username, password, environment: window.ZT.getEnvironment() },
       });
       await setStore({ zt_token: resp.access_token, zt_username: username, zt_session_id: resp.session_id });
       render();

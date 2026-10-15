@@ -1,10 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../context/AuthContext";
-import { createKeystrokeTracker } from "../telemetry/keystroke";
-import { createMouseTracker } from "../telemetry/mouse";
-import { getContextInfo } from "../telemetry/fingerprint";
+import { getEnvironment } from "../telemetry/environment";
 import Brand from "../components/Brand";
 
 export default function Login() {
@@ -14,33 +12,15 @@ export default function Login() {
   const [submitting, setSubmitting] = useState(false);
 
   const passwordRef = useRef(null);
-  const keystrokeTracker = useRef(createKeystrokeTracker());
-  const mouseTracker = useRef(createMouseTracker());
   const navigate = useNavigate();
   const { login } = useAuth();
-
-  useEffect(() => {
-    const detachMouse = mouseTracker.current.attach(document);
-    let detachKeys = () => {};
-    if (passwordRef.current) {
-      detachKeys = keystrokeTracker.current.attach(passwordRef.current);
-    }
-    return () => {
-      detachMouse();
-      detachKeys();
-    };
-  }, []);
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError("");
     setSubmitting(true);
     try {
-      const keystroke = keystrokeTracker.current.snapshot();
-      const mouse = mouseTracker.current.snapshot();
-      const context = getContextInfo();
-
-      const resp = await api.login({ username, password, keystroke, mouse, context });
+      const resp = await api.login({ username, password, environment: getEnvironment() });
       login(resp.access_token, username);
       navigate("/dashboard");
     } catch (err) {
